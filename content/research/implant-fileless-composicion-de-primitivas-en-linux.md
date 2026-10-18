@@ -1,7 +1,7 @@
 ---
-title: "Implant Fileless: La Composicion de Primitivas como Arma"
+title: "Fileless Implant: Primitive Composition as a Weapon"
 date: 2026-10-16
-description: "Analisis de como la composicion de primitivas del kernel Linux (mprotect, memfd_create, ptrace) produce capacidades ofensivas emergentes."
+description: "Analysis of how the composition of Linux kernel primitives (mprotect, memfd_create, ptrace) produces emergent offensive capabilities."
 tags: ["linux", "syscalls", "implant", "fileless", "ptrace", "composition", "offensive-security"]
 series: ["Linux Offensive Primitives"]
 cover:
@@ -12,189 +12,189 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisitos:** [mprotect como Vector de Ataque](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create y Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace e Inyeccion de Procesos](/research/ptrace-inyeccion-de-procesos-en-linux/)
+**Prerequisites:** [mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create and Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace and Process Injection](/research/ptrace-inyeccion-de-procesos-en-linux/)
 
 ---
 
-## Resumen
+## Summary
 
-Las tres investigaciones anteriores en esta serie documentaron primitivas individuales: `mprotect` para ejecutar codigo dinamicamente, `memfd_create` para eliminar la presencia en disco, y `ptrace` para inyectar en procesos ajenos. Cada una demostro una capacidad aislada con alcance limitado. Esta investigacion documenta lo que sucede cuando esas primitivas dejan de ser ejercicios independientes y se componen en una unica herramienta: un implant fileless con capacidad de migracion. El resultado no es la suma de las partes — es un salto cualitativo en capacidad que solo es posible cuando se entiende cada primitiva lo suficiente como para integrarlas.
-
----
-
-## 1. El Argumento de la Composicion
-
-Existe una diferencia fundamental entre conocer tecnicas individuales y saber componerlas.
-
-Quien entiende `memfd_create` puede ejecutar un binario sin disco. Quien entiende `ptrace` puede inyectar en otro proceso. Pero quien entiende ambas puede ejecutar un binario sin disco *dentro de un proceso que no es el suyo*. La combinacion produce una capacidad que ninguna de las dos ofrece por separado.
-
-Este principio — que la composicion de primitivas genera capacidades emergentes — es central en la seguridad ofensiva. Los frameworks como Metasploit y Cobalt Strike lo aplican internamente: combinan carga en memoria, inyeccion de procesos, comunicacion encubierta, y persistencia en flujos integrados. La diferencia es que esos frameworks abstraen la composicion. Sus usuarios seleccionan opciones de un menu. La maquinaria interna coordina las primitivas.
-
-La pregunta que motiva esta investigacion no es "como uso estas tecnicas" sino **"que emerge cuando se combinan, y por que esa combinacion es mas que la suma de sus partes"**.
+The three previous research pieces in this series documented individual primitives: `mprotect` for dynamic code execution, `memfd_create` for eliminating disk presence, and `ptrace` for injecting into foreign processes. Each demonstrated an isolated capability with limited scope. This research documents what happens when those primitives stop being independent exercises and are composed into a single tool: a fileless implant with migration capability. The result is not the sum of its parts — it is a qualitative leap in capability that is only possible when each primitive is understood deeply enough to integrate them.
 
 ---
 
-## 2. Anatomia del Implant
+## 1. The Composition Argument
 
-### 2.1 La Cadena de Ejecucion
+There is a fundamental difference between knowing individual techniques and knowing how to compose them.
 
-El sistema opera como una secuencia de tres etapas, cada una construida sobre la anterior:
+Whoever understands `memfd_create` can execute a binary without disk. Whoever understands `ptrace` can inject into another process. But whoever understands both can execute a binary without disk *inside a process that is not their own*. The combination produces a capability that neither offers on its own.
 
-**Etapa 1 — Carga sin disco.** Un loader contiene el binario del implant embebido en su propia seccion de datos. Al ejecutarse, crea un file descriptor anonimo en memoria mediante `memfd_create`, escribe el binario del implant en ese descriptor, y lo ejecuta a traves de la ruta virtual `/proc/self/fd/N`. El proceso del loader se reemplaza completamente por el implant. Despues de esta transicion, el loader deja de existir y el implant esta corriendo en memoria sin que ningun archivo en el filesystem lo respalde.
+This principle — that the composition of primitives generates emergent capabilities — is central to offensive security. Frameworks like Metasploit and Cobalt Strike apply it internally: they combine in-memory loading, process injection, covert communication, and persistence into integrated flows. The difference is that those frameworks abstract the composition. Their users select options from a menu. The internal machinery coordinates the primitives.
 
-**Etapa 2 — Operacion.** El implant establece una conexion TCP reversa usando syscalls de socket directas. Entra en un ciclo de recepcion de comandos y despacho de operaciones. Cada operacion — desde reportar informacion del sistema hasta ejecutar comandos o inspeccionar el mapa de memoria — se implementa exclusivamente con syscalls, sin invocar funciones de libc en ningun momento.
-
-**Etapa 3 — Migracion.** Cuando se decide mover la ejecucion a otro proceso, el implant usa `ptrace` para inyectar un shellcode de conexion reversa en el proceso objetivo. El shellcode crea su propia conexion de red, redirige los descriptores estandar del proceso al socket, y reemplaza la imagen del proceso con un shell interactivo. El proceso original del implant puede seguir operando o terminar — la presencia persiste en el nuevo proceso.
-
-Cada etapa depende de la anterior: la carga sin disco posibilita que el implant no tenga presencia en el filesystem, la operacion via syscalls directas evita los hooks de userspace, y la migracion permite que la ejecucion sobreviva la terminacion del proceso original.
-
-### 2.2 La Ausencia de libc como Decision de Diseno
-
-La decision de no usar libc tiene consecuencias operacionales concretas.
-
-Cuando un programa llama a `connect()` a traves de libc, la llamada pasa por la Procedure Linkage Table (PLT), que resuelve el simbolo en la libreria compartida. Un defensor que hookee la PLT o use `LD_PRELOAD` para interponer su propia version de `connect()` intercepta la llamada. `ltrace` registra cada invocacion a funciones de libreria. Un EDR que monitoree las llamadas a libc ve toda la actividad de red del proceso.
-
-Cuando el mismo programa invoca la syscall `connect` directamente (numero 42 en x86_64, argumentos en registros, instruccion `syscall`), ninguno de esos mecanismos lo detecta. No hay PLT que hookear porque no hay resolucion de simbolos. No hay libreria compartida que interponer porque no se usa ninguna. `ltrace` no reporta nada porque no hay llamadas a librerias. La operacion es invisible para toda herramienta que opere a nivel de userspace.
-
-La unica capa que ve la operacion es el kernel mismo: `strace` (que usa ptrace internamente), auditd, y eBPF. Estas son herramientas de un nivel de sofisticacion significativamente mayor que las defensas de userspace, y no todas las organizaciones las tienen configuradas para monitoreo activo.
-
-### 2.3 Comandos como Primitivas
-
-Cada comando del implant es una decision sobre el tradeoff entre visibilidad y flexibilidad.
-
-Los comandos que el implant implementa nativamente — informacion del sistema, lectura de mapas de memoria, listado de directorios — operan dentro del proceso del implant sin crear procesos hijos. Desde la perspectiva de un monitor de procesos, no sucede nada observable: un proceso lee su propio `/proc/self/maps` o invoca `getdents64` sobre un directorio. Son operaciones que cualquier proceso realiza como parte de su funcionamiento normal.
-
-La ejecucion de comandos arbitrarios requiere un tradeoff diferente. Para ejecutar un programa externo, el implant necesita crear un proceso hijo (`fork`), redirigir su salida a un pipe, ejecutar el programa (`execve`), capturar el output, y enviarlo. Cada uno de estos pasos es observable: `fork` crea un proceso nuevo visible en `ps`, `execve` carga un binario que puede ser inspeccionado, la cadena de padre-hijo es visible en el arbol de procesos.
-
-Un implant bien disenado minimiza la necesidad de ejecucion externa implementando la mayor cantidad posible de funcionalidad de forma nativa. Cada comando nativo es una operacion invisible. Cada ejecucion externa es una operacion observable. El balance entre ambos define el perfil de deteccion del implant.
+The question motivating this research is not "how do I use these techniques" but **"what emerges when they are combined, and why is that combination more than the sum of its parts."**
 
 ---
 
-## 3. La Migracion como Capacidad Emergente
+## 2. Implant Anatomy
 
-### 3.1 Por que Migrar
+### 2.1 The Execution Chain
 
-La migracion existe porque todo proceso tiene un ciclo de vida limitado.
+The system operates as a sequence of three stages, each built on the previous one:
 
-El proceso que ejecuta el implant puede ser terminado por un administrador, cerrado por un timeout del sistema, o identificado como anomalo por un EDR. Si la unica instancia de ejecucion del implant reside en ese proceso, la terminacion implica perdida total de acceso.
+**Stage 1 — Diskless loading.** A loader contains the implant binary embedded in its own data section. Upon execution, it creates an anonymous file descriptor in memory via `memfd_create`, writes the implant binary to that descriptor, and executes it through the virtual path `/proc/self/fd/N`. The loader process is completely replaced by the implant. After this transition, the loader ceases to exist and the implant is running in memory with no file on the filesystem backing it.
 
-La migracion resuelve este problema de la forma mas directa posible: mueve la ejecucion a un proceso que tiene menor probabilidad de ser terminado. Un servicio del sistema como `sshd`, `cron`, o un servidor web es un candidato ideal: son procesos longevos, esperados en el sistema, y cuya actividad de red (en el caso de servicios de red) enmascara las comunicaciones del payload.
+**Stage 2 — Operation.** The implant establishes a reverse TCP connection using direct socket syscalls. It enters a command reception and dispatch cycle. Every operation — from reporting system information to executing commands or inspecting the memory map — is implemented exclusively with syscalls, never invoking libc functions.
 
-### 3.2 La Mecanica de la Composicion
+**Stage 3 — Migration.** When the decision is made to move execution to another process, the implant uses `ptrace` to inject a reverse connection shellcode into the target process. The shellcode creates its own network connection, redirects the process's standard descriptors to the socket, and replaces the process image with an interactive shell. The original implant process can continue operating or terminate — presence persists in the new process.
 
-La migracion es donde la composicion de primitivas se manifiesta de forma mas clara.
+Each stage depends on the previous one: diskless loading ensures no filesystem presence, operation via direct syscalls avoids userspace hooks, and migration allows execution to survive the original process's termination.
 
-Para migrar, el implant necesita:
+### 2.2 The Absence of libc as a Design Decision
 
-1. **Conocimiento del target.** Se selecciona un proceso destino. El implant puede asistir en esta seleccion mostrando el arbol de procesos o los mapas de memoria de procesos candidatos — capacidades implementadas usando las mismas syscalls de lectura de `/proc` documentadas en esta serie.
+The decision not to use libc has concrete operational consequences.
 
-2. **Control del proceso remoto.** El implant usa `ptrace` para attacharse al proceso destino, detener su ejecucion, leer sus registros y memoria, escribir el payload, y reanudar la ejecucion.
+When a program calls `connect()` through libc, the call goes through the Procedure Linkage Table (PLT), which resolves the symbol in the shared library. A defender hooking the PLT or using `LD_PRELOAD` to interpose their own version of `connect()` intercepts the call. `ltrace` logs every library function invocation. An EDR monitoring libc calls sees all the process's network activity.
 
-3. **Establecimiento de comunicacion independiente.** El payload inyectado no puede depender de la conexion del implant original — esa conexion pertenece al proceso original y no es transferible. El payload necesita establecer su propia conexion de red. Esto significa que el shellcode inyectado debe contener la logica completa de `socket` + `connect` + redireccion de descriptores, implementada en codigo maquina position-independent.
+When the same program invokes the `connect` syscall directly (number 42 on x86_64, arguments in registers, `syscall` instruction), none of these mechanisms detect it. There is no PLT to hook because there is no symbol resolution. There is no shared library to interpose because none is used. `ltrace` reports nothing because there are no library calls. The operation is invisible to every tool operating at the userspace level.
 
-4. **Reemplazo del proceso.** Una vez que el payload tiene su propia conexion, ejecuta `execve` para reemplazar la imagen del proceso destino. El resultado es un shell interactivo corriendo dentro de un proceso que, desde la perspectiva del listado de procesos, no cambio: mismo PID, mismo PPID, mismo usuario. Solo su contenido es diferente.
+The only layer that sees the operation is the kernel itself: `strace` (which uses ptrace internally), auditd, and eBPF. These are tools of significantly higher sophistication than userspace defenses, and not all organizations have them configured for active monitoring.
 
-### 3.3 La Cuestion del Reinicio de Syscalls
+### 2.3 Commands as Primitives
 
-Un detalle tecnico que no emerge hasta que se intenta la composicion real: cuando un proceso esta en medio de una syscall bloqueante (como `nanosleep` en un proceso `sleep`), el kernel registra el numero de syscall en un campo especial de la estructura de registros (`orig_rax`). Si el proceso es interrumpido y luego reanudado, el kernel puede intentar reiniciar la syscall original en vez de ejecutar desde el nuevo instruction pointer.
+Each implant command is a decision about the tradeoff between visibility and flexibility.
 
-Este comportamiento es correcto para el caso de uso previsto (debugging): si un debugger detiene un proceso durante un `read()` y lo reanuda, el usuario espera que el `read()` continue. Pero para inyeccion, es un problema: se quiere que la ejecucion salte al shellcode, no que vuelva al `nanosleep` interrumpido.
+Commands the implant implements natively — system information, memory map reading, directory listing — operate within the implant's process without creating child processes. From a process monitor's perspective, nothing observable happens: a process reads its own `/proc/self/maps` or invokes `getdents64` on a directory. These are operations any process performs as part of normal functioning.
 
-La solucion es invalidar el campo `orig_rax` escribiendo un valor negativo antes de reanudar el proceso. Esto le indica al kernel que no hay syscall pendiente que reiniciar.
+Arbitrary command execution requires a different tradeoff. To execute an external program, the implant needs to create a child process (`fork`), redirect its output to a pipe, execute the program (`execve`), capture the output, and send it. Each of these steps is observable: `fork` creates a new process visible in `ps`, `execve` loads a binary that can be inspected, the parent-child chain is visible in the process tree.
 
-Este es un ejemplo de conocimiento que solo se adquiere en la practica de la composicion. Ninguna de las investigaciones individuales necesito considerar la interaccion entre la interrupcion de syscalls y la inyeccion de codigo. Solo cuando ambas operaciones se combinan en un flujo real — interrumpir un proceso bloqueado para inyectar shellcode — el problema se manifiesta.
-
----
-
-## 4. Perspectiva Ofensiva: La Suma de Evasiones
-
-### Capas de Invisibilidad
-
-Cada primitiva contribuye una capa de evasion. Compuestas, las capas se multiplican:
-
-**Sin presencia en disco.** El implant fue cargado via `memfd_create`. No existe como archivo en ningun filesystem. Los scanners de archivos (antivirus basado en firmas, file integrity monitoring) no tienen nada que escanear. El unico indicador estatico es `/proc/<pid>/exe` apuntando a `memfd:nombre (deleted)`.
-
-**Sin hooks de libc.** Toda operacion usa syscalls directas. `LD_PRELOAD`, interposicion de librerias, y `ltrace` son ciegos a la actividad del implant. Un nivel completo de instrumentacion defensiva queda neutralizado.
-
-**Sin proceso nuevo despues de migracion.** Despues de migrar, la ejecucion reside en un proceso preexistente. No hay nuevo binario, no hay nueva linea de comandos, no hay nuevo PID. El proceso victima retiene su identidad externa mientras ejecuta codigo inyectado.
-
-**Operaciones nativas silenciosas.** Los comandos implementados via syscalls directas (lectura de directorios, inspeccion de memoria, informacion del sistema) no generan procesos hijos ni invocaciones a programas externos. Son indistinguibles de las operaciones normales de cualquier proceso.
-
-Ninguna de estas capas es absoluta. Cada una tiene indicadores detectables. Pero un defensor que quiera detectar el implant necesita cubrir *todas* las capas: monitorear `/proc/*/exe` para fileless execution, instrumentar syscalls via eBPF para actividad sin libc, auditar `ptrace` para inyeccion, y analizar comportamiento para operaciones anomalas. La omision de cualquier capa deja un punto ciego.
-
-### Lo que un Framework Abstrae
-
-Cuando un framework como Metasploit ejecuta una migracion de meterpreter entre procesos, internamente ejecuta exactamente estas primitivas. La diferencia es el nivel de abstraccion: se selecciona `migrate <pid>` y el framework coordina el attach, la inyeccion, y la ejecucion.
-
-Implementar la misma capacidad desde las primitivas crudas revela los puntos de decision que la abstraccion oculta:
-
-- ¿En que direccion de memoria se inyecta? El framework elige automaticamente. Sin abstraccion, hay que entender por que se usa la direccion actual de RIP (porque esa memoria ya es ejecutable).
-- ¿Como se maneja la escritura parcial de words? POKETEXT escribe 8 bytes a la vez. Si el shellcode no es multiplo de 8, la ultima escritura necesita una operacion de merge con los bytes originales.
-- ¿Que pasa si el target esta en una syscall bloqueante? Hay que descubrir el problema de `orig_rax` y la politica de reinicio de syscalls del kernel.
-
-Cada una de estas decisiones es invisible para el usuario del framework y obligatoria para quien implementa la herramienta.
+A well-designed implant minimizes the need for external execution by implementing as much functionality natively as possible. Each native command is an invisible operation. Each external execution is an observable operation. The balance between both defines the implant's detection profile.
 
 ---
 
-## 5. Perspectiva Defensiva: Detectar la Composicion
+## 3. Migration as an Emergent Capability
 
-### 5.1 Indicadores por Capa
+### 3.1 Why Migrate
 
-| Capa | Indicador | Donde Buscarlo | Confiabilidad |
+Migration exists because every process has a limited lifecycle.
+
+The process executing the implant can be terminated by an administrator, closed by a system timeout, or identified as anomalous by an EDR. If the only execution instance of the implant resides in that process, termination means total loss of access.
+
+Migration solves this problem in the most direct way possible: it moves execution to a process that is less likely to be terminated. A system service like `sshd`, `cron`, or a web server is an ideal candidate: they are long-lived processes, expected on the system, and whose network activity (in the case of network services) masks the payload's communications.
+
+### 3.2 The Mechanics of Composition
+
+Migration is where the composition of primitives manifests most clearly.
+
+To migrate, the implant needs:
+
+1. **Target knowledge.** A destination process is selected. The implant can assist in this selection by showing the process tree or memory maps of candidate processes — capabilities implemented using the same `/proc` reading syscalls documented in this series.
+
+2. **Remote process control.** The implant uses `ptrace` to attach to the destination process, halt its execution, read its registers and memory, write the payload, and resume execution.
+
+3. **Independent communication establishment.** The injected payload cannot depend on the original implant's connection — that connection belongs to the original process and is not transferable. The payload needs to establish its own network connection. This means the injected shellcode must contain the complete logic for `socket` + `connect` + descriptor redirection, implemented in position-independent machine code.
+
+4. **Process replacement.** Once the payload has its own connection, it executes `execve` to replace the destination process's image. The result is an interactive shell running inside a process that, from the process listing's perspective, has not changed: same PID, same PPID, same user. Only its content is different.
+
+### 3.3 The Syscall Restart Issue
+
+A technical detail that does not emerge until real composition is attempted: when a process is in the middle of a blocking syscall (like `nanosleep` in a `sleep` process), the kernel records the syscall number in a special field of the register structure (`orig_rax`). If the process is interrupted and then resumed, the kernel may attempt to restart the original syscall instead of executing from the new instruction pointer.
+
+This behavior is correct for the intended use case (debugging): if a debugger halts a process during a `read()` and resumes it, the user expects the `read()` to continue. But for injection, it is a problem: the execution should jump to the shellcode, not return to the interrupted `nanosleep`.
+
+The solution is to invalidate the `orig_rax` field by writing a negative value before resuming the process. This tells the kernel there is no pending syscall to restart.
+
+This is an example of knowledge that is only acquired through the practice of composition. None of the individual research pieces needed to consider the interaction between syscall interruption and code injection. Only when both operations are combined in a real flow — interrupting a blocked process to inject shellcode — does the problem manifest.
+
+---
+
+## 4. Offensive Perspective: The Sum of Evasions
+
+### Layers of Invisibility
+
+Each primitive contributes an evasion layer. Composed, the layers multiply:
+
+**No disk presence.** The implant was loaded via `memfd_create`. It does not exist as a file on any filesystem. File scanners (signature-based antivirus, file integrity monitoring) have nothing to scan. The only static indicator is `/proc/<pid>/exe` pointing to `memfd:name (deleted)`.
+
+**No libc hooks.** Every operation uses direct syscalls. `LD_PRELOAD`, library interposition, and `ltrace` are blind to the implant's activity. An entire level of defensive instrumentation is neutralized.
+
+**No new process after migration.** After migrating, execution resides in a pre-existing process. No new binary, no new command line, no new PID. The victim process retains its external identity while executing injected code.
+
+**Silent native operations.** Commands implemented via direct syscalls (directory reading, memory inspection, system information) generate no child processes and no invocations of external programs. They are indistinguishable from any process's normal operations.
+
+None of these layers is absolute. Each has detectable indicators. But a defender who wants to detect the implant needs to cover *all* layers: monitor `/proc/*/exe` for fileless execution, instrument syscalls via eBPF for libc-free activity, audit `ptrace` for injection, and analyze behavior for anomalous operations. Omitting any layer leaves a blind spot.
+
+### What a Framework Abstracts
+
+When a framework like Metasploit executes a meterpreter migration between processes, it internally executes exactly these primitives. The difference is the level of abstraction: `migrate <pid>` is selected and the framework coordinates the attach, injection, and execution.
+
+Implementing the same capability from raw primitives reveals the decision points that the abstraction hides:
+
+- At what memory address is the injection performed? The framework chooses automatically. Without abstraction, one must understand why the current RIP address is used (because that memory is already executable).
+- How is partial word writing handled? POKETEXT writes 8 bytes at a time. If the shellcode is not a multiple of 8, the last write needs a merge operation with the original bytes.
+- What happens if the target is in a blocking syscall? The `orig_rax` problem and the kernel's syscall restart policy must be discovered.
+
+Each of these decisions is invisible to the framework user and mandatory for whoever implements the tool.
+
+---
+
+## 5. Defensive Perspective: Detecting the Composition
+
+### 5.1 Indicators by Layer
+
+| Layer | Indicator | Where to Look | Reliability |
 |---|---|---|---|
-| Fileless | `/proc/<pid>/exe` → `memfd:*` | Escaneo periodico de `/proc/*/exe` | Alta |
-| Sin libc | Proceso sin `libc.so` en `/proc/<pid>/maps` pero con actividad de red | Correlacion maps vs conexiones | Media-alta |
-| Migracion | `ptrace ATTACH` desde proceso no-debugger | auditd, eBPF en syscall 101 | Alta |
-| Shellcode | Transicion de RIP a region inesperada post-ptrace | Monitoreo de registros pre/post detach | Baja (requiere instrumentacion profunda) |
-| Conexion C2 | Conexion TCP saliente a IP/puerto inusual | `ss -tnp`, logs de firewall | Media |
-| Ejecucion | `fork`+`execve` desde proceso que normalmente no ejecuta | Baseline comportamental | Media |
+| Fileless | `/proc/<pid>/exe` → `memfd:*` | Periodic scan of `/proc/*/exe` | High |
+| No libc | Process without `libc.so` in `/proc/<pid>/maps` but with network activity | Correlation maps vs connections | Medium-high |
+| Migration | `ptrace ATTACH` from non-debugger process | auditd, eBPF on syscall 101 | High |
+| Shellcode | RIP transition to unexpected region post-ptrace | Register monitoring pre/post detach | Low (requires deep instrumentation) |
+| C2 connection | Outbound TCP connection to unusual IP/port | `ss -tnp`, firewall logs | Medium |
+| Execution | `fork`+`execve` from process that normally does not execute | Behavioral baseline | Medium |
 
-### 5.2 La Deteccion por Correlacion
+### 5.2 Detection by Correlation
 
-Los indicadores individuales generan falsos positivos. Un proceso sin libc en maps no es necesariamente malicioso (binarios estaticos existen). Una invocacion de ptrace no es necesariamente inyeccion (debuggers existen). Una conexion TCP saliente no es necesariamente C2 (aplicaciones legitimas hacen conexiones).
+Individual indicators generate false positives. A process without libc in maps is not necessarily malicious (static binaries exist). A ptrace invocation is not necessarily injection (debuggers exist). An outbound TCP connection is not necessarily C2 (legitimate applications make connections).
 
-La deteccion efectiva del implant compuesto requiere **correlacion temporal y contextual** de multiples indicadores:
+Effective detection of the composite implant requires **temporal and contextual correlation** of multiple indicators:
 
-- Un proceso cuyo `/proc/<pid>/exe` apunta a un memfd **Y** tiene una conexion TCP saliente **Y** no tiene libc en su mapa de memoria → alta probabilidad de implant fileless.
-- Un servicio del sistema que recibe un `ptrace ATTACH` **Y** poco despues establece una nueva conexion TCP que no existia antes → alta probabilidad de migracion post-inyeccion.
-- Un proceso que ejecuta `fork`+`execve` de `/bin/sh` **Y** cuyos descriptores stdin/stdout apuntan a un socket **Y** ese socket se creo recientemente → alta probabilidad de reverse shell.
+- A process whose `/proc/<pid>/exe` points to a memfd **AND** has an outbound TCP connection **AND** has no libc in its memory map → high probability of fileless implant.
+- A system service that receives a `ptrace ATTACH` **AND** shortly after establishes a new TCP connection that did not exist before → high probability of post-injection migration.
+- A process executing `fork`+`execve` of `/bin/sh` **AND** whose stdin/stdout descriptors point to a socket **AND** that socket was recently created → high probability of reverse shell.
 
-Ningun indicador individual justifica una alerta de alta prioridad. La combinacion de dos o mas, en una ventana temporal estrecha, si la justifica. Los sistemas de deteccion que correlacionan multiples fuentes de telemetria (SIEM con reglas de correlacion, EDR con deteccion comportamental) estan disenados para exactamente este tipo de patron.
+No individual indicator justifies a high-priority alert. The combination of two or more, within a narrow temporal window, does. Detection systems that correlate multiple telemetry sources (SIEM with correlation rules, EDR with behavioral detection) are designed for exactly this type of pattern.
 
-### 5.3 El Punto Ciego Temporal
+### 5.3 The Temporal Blind Spot
 
-La ventana de deteccion para la migracion es particularmente estrecha. La secuencia completa — attach, inyeccion, ejecucion, detach — puede completarse en milisegundos. Un sistema que muestrea `/proc/<pid>/status` cada segundo tiene una probabilidad baja de capturar el campo `TracerPid` durante la ventana de inyeccion.
+The detection window for migration is particularly narrow. The complete sequence — attach, injection, execution, detach — can complete in milliseconds. A system sampling `/proc/<pid>/status` every second has a low probability of capturing the `TracerPid` field during the injection window.
 
-Despues de la migracion, el proceso victima ha sido reemplazado por un shell. Su `/proc/<pid>/exe` ahora apunta a `/bin/sh` (o `/bin/dash`), lo cual es el indicador mas persistente. Pero un proceso ejecutando `/bin/sh` no es inherentemente sospechoso — scripts de sistema, cron jobs, y sesiones interactivas usan shells constantemente.
+After migration, the victim process has been replaced by a shell. Its `/proc/<pid>/exe` now points to `/bin/sh` (or `/bin/dash`), which is the most persistent indicator. But a process executing `/bin/sh` is not inherently suspicious — system scripts, cron jobs, and interactive sessions use shells constantly.
 
-La deteccion mas robusta no busca el evento de inyeccion (demasiado breve) sino sus **consecuencias**: un proceso que cambio de binario (`exe` apunta a algo diferente de lo que el proceso fue originalmente), un servicio que ahora tiene conexiones de red que no tenia antes, o un cambio en el patron de syscalls de un proceso longevo.
+The most robust detection does not look for the injection event (too brief) but for its **consequences**: a process that changed its binary (`exe` points to something different from what the process originally was), a service that now has network connections it did not have before, or a change in the syscall pattern of a long-lived process.
 
-### 5.4 Mitigaciones Estructurales
+### 5.4 Structural Mitigations
 
-**seccomp-bpf:** Restringir `memfd_create`, `ptrace`, y `execveat` para procesos que no los necesitan. La mayoria de los servicios de produccion nunca usan estas syscalls, asi que el impacto operacional es minimo. Los contenedores modernos ya eliminan `SYS_PTRACE` por defecto.
+**seccomp-bpf:** Restrict `memfd_create`, `ptrace`, and `execveat` for processes that do not need them. Most production services never use these syscalls, so the operational impact is minimal. Modern containers already drop `SYS_PTRACE` by default.
 
-**Yama ptrace_scope:** Scope 2 o 3 bloquea ptrace para usuarios no privilegiados. Esto impide la migracion a menos que se tenga `CAP_SYS_PTRACE` o root.
+**Yama ptrace_scope:** Scope 2 or 3 blocks ptrace for unprivileged users. This prevents migration unless `CAP_SYS_PTRACE` or root is held.
 
-**Namespaces y cgroups:** El aislamiento de procesos en namespaces de PID y red limita el alcance de la migracion. Un implant dentro de un contenedor no puede migrar a procesos fuera del contenedor (sin escape de contenedor adicional).
+**Namespaces and cgroups:** Process isolation in PID and network namespaces limits migration scope. An implant inside a container cannot migrate to processes outside the container (without an additional container escape).
 
-**Monitoreo de integridad de procesos:** Verificar periodicamente que `/proc/<pid>/exe` de servicios criticos apunta al binario esperado. Cualquier cambio inesperado merece investigacion inmediata.
+**Process integrity monitoring:** Periodically verify that `/proc/<pid>/exe` of critical services points to the expected binary. Any unexpected change warrants immediate investigation.
 
-**Segmentacion de red:** Detectar y alertar sobre conexiones salientes desde servicios que no deberian iniciar conexiones. Un `sshd` que de pronto establece una conexion TCP a un puerto alto en una IP externa es altamente sospechoso.
-
----
-
-## 6. Reflexion Final
-
-Esta investigacion completa un arco que comenzo con la pregunta mas basica — "como le pido al kernel que haga algo" — y culmina con un sistema que compone multiples respuestas en una herramienta cohesiva.
-
-Cada primitiva individual es una capacidad del kernel disenada para un proposito legitimo. `memfd_create` existe para memoria compartida segura. `ptrace` existe para debugging. Las syscalls de socket existen para comunicacion de red. `fork` y `execve` existen para crear y ejecutar procesos.
-
-La leccion central no ha cambiado desde la primera investigacion: **el sistema funciona exactamente como fue especificado**. No hay bugs explotados, no hay vulnerabilidades aprovechadas, no hay comportamiento inesperado del kernel. Lo que hay es una composicion de interfaces publicas que produce un efecto que los disenadores no contemplaron como caso de uso principal.
-
-La defensa contra esta composicion no puede basarse en bloquear primitivas individuales — hacerlo romperia funcionalidad legitima que depende de ellas. Tiene que basarse en detectar los patrones de composicion: la correlacion temporal de operaciones que individualmente son benignas pero que combinadas indican actividad adversarial.
-
-Este es el problema irreducible de la seguridad de sistemas: un kernel que expone primitivas lo suficientemente poderosas como para construir herramientas utiles es, por definicion, un kernel que expone primitivas lo suficientemente poderosas como para construir herramientas ofensivas. La linea entre ambas no esta en las primitivas — esta en la intencion y el contexto de quien las compone.
+**Network segmentation:** Detect and alert on outbound connections from services that should not initiate connections. An `sshd` that suddenly establishes a TCP connection to a high port on an external IP is highly suspicious.
 
 ---
 
-*Investigacion realizada como parte del proyecto [Black Hat Zig](https://github.com/JorgeBeritan) — documentacion de tecnicas ofensivas a nivel de syscall en Linux.*
+## 6. Final Reflection
+
+This research completes an arc that began with the most basic question — "how do I ask the kernel to do something" — and culminates in a system that composes multiple answers into a cohesive tool.
+
+Each individual primitive is a kernel capability designed for a legitimate purpose. `memfd_create` exists for secure shared memory. `ptrace` exists for debugging. Socket syscalls exist for network communication. `fork` and `execve` exist for creating and executing processes.
+
+The central lesson has not changed since the first research piece: **the system works exactly as specified**. No bugs are exploited, no vulnerabilities are leveraged, no unexpected kernel behavior is involved. What exists is a composition of public interfaces that produces an effect the designers did not contemplate as a primary use case.
+
+Defense against this composition cannot be based on blocking individual primitives — doing so would break legitimate functionality that depends on them. It must be based on detecting composition patterns: the temporal correlation of operations that are individually benign but that combined indicate adversarial activity.
+
+This is the irreducible problem of systems security: a kernel that exposes primitives powerful enough to build useful tools is, by definition, a kernel that exposes primitives powerful enough to build offensive tools. The line between both is not in the primitives — it is in the intent and context of whoever composes them.
+
+---
+
+*Research conducted as part of the [Black Hat Zig](https://github.com/JorgeBeritan) project — documentation of offensive techniques at the syscall level on Linux.*

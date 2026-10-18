@@ -1,7 +1,7 @@
 ---
-title: "Inyeccion de Procesos en Linux: ptrace como Herramienta de Control Total"
+title: "Process Injection on Linux: ptrace as a Total Control Tool"
 date: 2026-10-12
-description: "Uso de la syscall ptrace para leer, escribir y ejecutar codigo en el contexto de un proceso ajeno en Linux."
+description: "Using the ptrace syscall to read, write, and execute code in the context of a foreign process on Linux."
 tags: ["linux", "syscalls", "ptrace", "process-injection", "offensive-security"]
 series: ["Linux Offensive Primitives"]
 cover:
@@ -12,230 +12,230 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisitos:** [mprotect como Vector de Ataque](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create y Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/)
+**Prerequisites:** [mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create and Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/)
 
 ---
 
-## Resumen
+## Summary
 
-Las tecnicas documentadas anteriormente en esta serie — ejecucion dinamica de shellcode via `mprotect` y ejecucion sin archivo via `memfd_create` — operan dentro del espacio de memoria del propio proceso. Esta investigacion cruza esa frontera: documenta el uso de la syscall `ptrace` para leer, escribir y ejecutar codigo en el contexto de un proceso ajeno. Es la convergencia de todas las primitivas estudiadas hasta ahora y representa la capacidad ofensiva mas completa que ofrece el kernel Linux desde userspace.
-
----
-
-## 1. El Salto Conceptual
-
-Existe una diferencia cualitativa entre ejecutar codigo en tu propio proceso y ejecutar codigo en el proceso de otro.
-
-En las tecnicas anteriores, se crea memoria, se escribe el payload, y se ejecuta. El proceso que realiza la ejecucion es el mismo que fue creado. Un defensor que lista los procesos activos veria un proceso desconocido — un binario que no deberia estar ahi.
-
-La inyeccion de procesos elimina esa visibilidad. El payload se ejecuta dentro de un proceso **que ya existia antes de la operacion**: un servidor web, un demonio del sistema, un proceso del usuario. Desde la perspectiva de un listado de procesos, nada cambio. No hay proceso nuevo, no hay binario desconocido, no hay linea de comandos sospechosa.
-
-La pregunta que esta tecnica responde no es "como ejecuto mi codigo" sino **"como hago que un proceso legitimo ejecute codigo arbitrario sin que nadie note la diferencia"**.
+The techniques documented previously in this series — dynamic shellcode execution via `mprotect` and fileless execution via `memfd_create` — operate within the process's own memory space. This research crosses that boundary: it documents the use of the `ptrace` syscall to read, write, and execute code in the context of a foreign process. It is the convergence of all primitives studied so far and represents the most complete offensive capability the Linux kernel offers from userspace.
 
 ---
 
-## 2. La Primitiva: ptrace
+## 1. The Conceptual Leap
 
-### Que es y por que existe
+There is a qualitative difference between executing code in your own process and executing code in someone else's process.
 
-`ptrace` (process trace) es una syscall que permite a un proceso — el **tracer** — observar y controlar la ejecucion de otro proceso — el **tracee**. Es la base sobre la que se construyen todos los debuggers en Linux: GDB, LLDB, strace, ltrace. Sin `ptrace`, el debugging interactivo de procesos en Linux no seria posible.
+In the previous techniques, memory is created, the payload is written, and it is executed. The process performing the execution is the same one that was created. A defender listing active processes would see an unknown process — a binary that should not be there.
 
-La syscall ofrece un conjunto de operaciones:
+Process injection eliminates that visibility. The payload executes inside a process **that already existed before the operation**: a web server, a system daemon, a user process. From the perspective of a process listing, nothing changed. No new process, no unknown binary, no suspicious command line.
 
-| Operacion | Que permite |
+The question this technique answers is not "how do I execute my code" but **"how do I make a legitimate process execute arbitrary code without anyone noticing the difference."**
+
+---
+
+## 2. The Primitive: ptrace
+
+### What it is and why it exists
+
+`ptrace` (process trace) is a syscall that allows one process — the **tracer** — to observe and control the execution of another process — the **tracee**. It is the foundation upon which all debuggers on Linux are built: GDB, LLDB, strace, ltrace. Without `ptrace`, interactive process debugging on Linux would not be possible.
+
+The syscall offers a set of operations:
+
+| Operation | What it allows |
 |---|---|
-| ATTACH | Conectarse a un proceso existente y detener su ejecucion |
-| GETREGS | Leer todos los registros del procesador del tracee |
-| SETREGS | Escribir los registros del procesador del tracee |
-| PEEKTEXT | Leer una word (8 bytes) de la memoria del tracee |
-| POKETEXT | Escribir una word (8 bytes) en la memoria del tracee |
-| CONT | Reanudar la ejecucion del tracee |
-| DETACH | Desconectarse del tracee y dejarlo continuar |
+| ATTACH | Connect to an existing process and halt its execution |
+| GETREGS | Read all processor registers of the tracee |
+| SETREGS | Write the processor registers of the tracee |
+| PEEKTEXT | Read one word (8 bytes) from the tracee's memory |
+| POKETEXT | Write one word (8 bytes) to the tracee's memory |
+| CONT | Resume the tracee's execution |
+| DETACH | Disconnect from the tracee and let it continue |
 
-Cada una de estas operaciones fue disenada para debugging. GETREGS permite a GDB mostrar el estado del procesador. PEEKTEXT permite inspeccionar memoria. POKETEXT permite insertar breakpoints. CONT permite ejecutar instruccion por instruccion.
+Each of these operations was designed for debugging. GETREGS lets GDB display the processor state. PEEKTEXT lets it inspect memory. POKETEXT lets it insert breakpoints. CONT lets it execute instruction by instruction.
 
-El punto critico es que **la interfaz no distingue entre uso para debugging y uso para inyeccion**. Las mismas operaciones que permiten a GDB insertar un breakpoint (POKETEXT con el byte 0xCC) permiten a un atacante escribir shellcode arbitrario.
+The critical point is that **the interface does not distinguish between debugging use and injection use**. The same operations that allow GDB to insert a breakpoint (POKETEXT with byte 0xCC) allow an attacker to write arbitrary shellcode.
 
-### Comparacion con Windows
+### Comparison with Windows
 
-En Windows, las capacidades equivalentes estan distribuidas en multiples APIs:
+On Windows, the equivalent capabilities are distributed across multiple APIs:
 
-- `OpenProcess` → obtener un handle al proceso
-- `ReadProcessMemory` / `WriteProcessMemory` → leer/escribir memoria
-- `GetThreadContext` / `SetThreadContext` → leer/escribir registros
-- `CreateRemoteThread` / `NtCreateThreadEx` → crear un hilo en el proceso remoto
-- `VirtualAllocEx` / `VirtualProtectEx` → gestionar memoria remota
+- `OpenProcess` → obtain a handle to the process
+- `ReadProcessMemory` / `WriteProcessMemory` → read/write memory
+- `GetThreadContext` / `SetThreadContext` → read/write registers
+- `CreateRemoteThread` / `NtCreateThreadEx` → create a thread in the remote process
+- `VirtualAllocEx` / `VirtualProtectEx` → manage remote memory
 
-Son al menos seis APIs coordinadas para lograr lo que `ptrace` hace con una sola syscall y diferentes codigos de operacion. La superficie de monitoreo en Windows es mas amplia precisamente porque hay mas puntos de intercepcion. En Linux, todo pasa por un unico punto: la syscall 101.
+That is at least six coordinated APIs to achieve what `ptrace` does with a single syscall and different operation codes. The monitoring surface on Windows is wider precisely because there are more interception points. On Linux, everything goes through a single point: syscall 101.
 
-Esto tiene implicaciones defensivas directas. En Windows, un EDR puede hookear `CreateRemoteThread` especificamente para detectar inyeccion sin afectar el debugging. En Linux, monitorear `ptrace` para detectar inyeccion inevitablemente detecta (y potencialmente interfiere con) el debugging legitimo.
-
----
-
-## 3. El Flujo de Inyeccion
-
-### Fase 1 — Seleccion del target
-
-Antes de inyectar, hay que elegir un proceso target. La seleccion depende del objetivo:
-
-- **Persistencia**: un demonio que siempre esta corriendo (sshd, cron, un servicio web).
-- **Evasion**: un proceso que naturalmente genera trafico de red (un browser, un cliente DNS) para camuflar comunicaciones C2.
-- **Escalacion**: un proceso que corre con privilegios superiores.
-
-El proceso ideal es uno que sea comun, longevo, y cuya actividad normal enmascare la actividad del payload.
-
-### Fase 2 — Attach y detencion
-
-Se invoca `ptrace(ATTACH, pid)`. El kernel envia una senal SIGSTOP al tracee, deteniendo su ejecucion. Se usa `waitpid` para confirmar que el tracee se detuvo.
-
-Este es el momento mas visible de la operacion. El proceso victima se congela brevemente. Si el proceso esta manejando conexiones activas o timers criticos, la pausa puede causar efectos observables (timeouts, conexiones cortadas).
-
-### Fase 3 — Reconocimiento del estado
-
-Se leen los registros del tracee con GETREGS. El registro mas importante es **RIP** (instruction pointer): indica exactamente donde estaba ejecutando el proceso cuando fue detenido. Tambien se captura **RSP** (stack pointer) y el resto de registros de proposito general.
-
-Este estado completo se guarda. Es la "fotografia" del proceso antes de la inyeccion, y sera necesaria para la restauracion posterior.
-
-### Fase 4 — Preservacion de memoria
-
-Antes de escribir el shellcode, se leen y guardan los bytes originales en la direccion donde se va a inyectar (tipicamente la direccion actual de RIP). Sin estos bytes guardados, el proceso no puede ser restaurado a su estado original.
-
-La lectura se hace con PEEKTEXT, que retorna una word (8 bytes) por invocacion. Para un shellcode de N bytes, se necesitan ceil(N/8) invocaciones.
-
-### Fase 5 — Escritura del payload
-
-Se escribe el shellcode en la memoria del tracee usando POKETEXT, que escribe una word por invocacion. El shellcode sobreescribe las instrucciones originales en la direccion de RIP.
-
-Una sutileza tecnica: POKETEXT escribe words completas de 8 bytes. Si el shellcode no es multiplo de 8, la ultima escritura necesita ser una operacion de "merge": leer la word original con PEEKTEXT, reemplazar solo los bytes necesarios, y escribir la word combinada con POKETEXT. Sin este cuidado, se corrompen bytes adyacentes al shellcode.
-
-### Fase 6 — Ejecucion
-
-Se invoca `ptrace(CONT, pid)`. El tracee reanuda su ejecucion, pero ahora RIP apunta al shellcode inyectado. El procesador decodifica y ejecuta el shellcode como si fueran las instrucciones originales del proceso.
-
-El shellcode termina con una instruccion `int3` (byte 0xCC). Esta instruccion genera una excepcion de breakpoint (SIGTRAP) que detiene el tracee y notifica al tracer. Es el mecanismo de retorno: el shellcode senaliza "termine" sin necesidad de conocer una direccion de retorno.
-
-Un punto de diseno importante: en la ejecucion via `mprotect` documentada anteriormente, el shellcode usaba `ret` para volver al caller. Eso era posible porque habia un `call` previo que deposito una direccion de retorno en el stack. En la inyeccion via `ptrace`, no hay `call` — el RIP fue modificado directamente. No hay direccion de retorno en el stack. El `int3` resuelve este problema: detiene la ejecucion y devuelve el control al tracer a traves del mecanismo de senales del kernel, no a traves del stack.
-
-### Fase 7 — Restauracion
-
-Despues de que el shellcode ejecuta y el tracee se detiene en `int3`, el tracer:
-
-1. Restaura los bytes originales en memoria (POKETEXT con los bytes guardados en la Fase 4).
-2. Restaura los registros originales (SETREGS con los valores guardados en la Fase 3).
-
-El proceso victima queda en el estado exacto en que estaba antes de la inyeccion. Su memoria contiene las instrucciones originales, sus registros apuntan donde apuntaban, y su stack no fue modificado.
-
-### Fase 8 — Detach
-
-Se invoca `ptrace(DETACH, pid)`. La relacion de tracing se disuelve. El tracee continua su ejecucion normal desde el punto exacto donde fue detenido.
-
-Si la operacion fue realizada correctamente, el proceso victima no tiene forma de saber que fue inyectado. Su ejecucion continua sin errores, sin crashes, sin inconsistencias en su estado interno.
+This has direct defensive implications. On Windows, an EDR can hook `CreateRemoteThread` specifically to detect injection without affecting debugging. On Linux, monitoring `ptrace` to detect injection inevitably detects (and potentially interferes with) legitimate debugging.
 
 ---
 
-## 4. La Cuestion del Stealth
+## 3. The Injection Flow
 
-### Que evidencia queda
+### Phase 1 — Target selection
 
-**Durante la inyeccion:**
-- El proceso victima tiene el estado `t` (traced) en `/proc/<pid>/status`. Cualquier herramienta que consulte este campo ve que el proceso esta siendo traceado.
-- El campo `TracerPid` en `/proc/<pid>/status` muestra el PID del tracer.
-- La pausa en la ejecucion del tracee puede ser observable si maneja conexiones activas.
+Before injecting, a target process must be chosen. The selection depends on the objective:
 
-**Despues del detach:**
-- `TracerPid` vuelve a 0.
-- El estado del proceso vuelve a su estado normal.
-- La memoria y los registros fueron restaurados.
-- **No queda evidencia persistente en el proceso.** Sin un monitoreo activo durante la ventana de inyeccion, no hay artefacto que un analisis posterior pueda encontrar.
+- **Persistence**: a daemon that is always running (sshd, cron, a web service).
+- **Evasion**: a process that naturally generates network traffic (a browser, a DNS client) to camouflage C2 communications.
+- **Escalation**: a process running with higher privileges.
 
-### La ventana temporal
+The ideal process is one that is common, long-lived, and whose normal activity masks the payload's activity.
 
-La ventana de deteccion es el tiempo entre ATTACH y DETACH. Para un shellcode pequeno, este tiempo puede ser de microsegundos. Un defensor que no este muestreando activamente `/proc/<pid>/status` en ese intervalo preciso no detectara la inyeccion.
+### Phase 2 — Attach and halt
 
-Esto crea una asimetria fundamental: el atacante controla la duracion de la ventana, y el defensor necesita estar observando durante esa ventana especifica. El atacante necesita tener exito una vez; el defensor necesita estar vigilando todo el tiempo.
+`ptrace(ATTACH, pid)` is invoked. The kernel sends a SIGSTOP signal to the tracee, halting its execution. `waitpid` is used to confirm the tracee has stopped.
+
+This is the most visible moment of the operation. The victim process freezes briefly. If the process is handling active connections or critical timers, the pause can cause observable effects (timeouts, dropped connections).
+
+### Phase 3 — State reconnaissance
+
+The tracee's registers are read with GETREGS. The most important register is **RIP** (instruction pointer): it indicates exactly where the process was executing when it was halted. **RSP** (stack pointer) and all other general-purpose registers are also captured.
+
+This complete state is saved. It is the "snapshot" of the process before injection, and will be needed for subsequent restoration.
+
+### Phase 4 — Memory preservation
+
+Before writing shellcode, the original bytes at the address where injection will occur (typically the current RIP address) are read and saved. Without these saved bytes, the process cannot be restored to its original state.
+
+The read is done with PEEKTEXT, which returns one word (8 bytes) per invocation. For shellcode of N bytes, ceil(N/8) invocations are needed.
+
+### Phase 5 — Payload writing
+
+The shellcode is written to the tracee's memory using POKETEXT, which writes one word per invocation. The shellcode overwrites the original instructions at the RIP address.
+
+A technical subtlety: POKETEXT writes complete 8-byte words. If the shellcode is not a multiple of 8, the last write needs to be a "merge" operation: read the original word with PEEKTEXT, replace only the necessary bytes, and write the combined word with POKETEXT. Without this care, bytes adjacent to the shellcode are corrupted.
+
+### Phase 6 — Execution
+
+`ptrace(CONT, pid)` is invoked. The tracee resumes execution, but now RIP points to the injected shellcode. The processor decodes and executes the shellcode as if it were the process's original instructions.
+
+The shellcode terminates with an `int3` instruction (byte 0xCC). This instruction generates a breakpoint exception (SIGTRAP) that halts the tracee and notifies the tracer. It is the return mechanism: the shellcode signals "I'm done" without needing to know a return address.
+
+An important design point: in the `mprotect` execution documented previously, the shellcode used `ret` to return to the caller. That was possible because there was a prior `call` that deposited a return address on the stack. In ptrace injection, there is no `call` — RIP was modified directly. There is no return address on the stack. `int3` solves this problem: it halts execution and returns control to the tracer through the kernel's signal mechanism, not through the stack.
+
+### Phase 7 — Restoration
+
+After the shellcode executes and the tracee halts on `int3`, the tracer:
+
+1. Restores the original bytes in memory (POKETEXT with the bytes saved in Phase 4).
+2. Restores the original registers (SETREGS with the values saved in Phase 3).
+
+The victim process is left in the exact state it was in before injection. Its memory contains the original instructions, its registers point where they pointed, and its stack was not modified.
+
+### Phase 8 — Detach
+
+`ptrace(DETACH, pid)` is invoked. The tracing relationship dissolves. The tracee continues its normal execution from the exact point where it was halted.
+
+If the operation was performed correctly, the victim process has no way of knowing it was injected. Its execution continues without errors, without crashes, without inconsistencies in its internal state.
 
 ---
 
-## 5. Cadena de Ataque Completa
+## 4. The Stealth Question
 
-Esta tecnica no existe en aislamiento. Representa la culminacion de las primitivas documentadas en esta serie, y su poder real emerge cuando se encadenan:
+### What evidence remains
 
-### Reconocimiento: /proc/self/maps
+**During injection:**
+- The victim process has the `t` (traced) state in `/proc/<pid>/status`. Any tool that queries this field sees the process is being traced.
+- The `TracerPid` field in `/proc/<pid>/status` shows the tracer's PID.
+- The pause in the tracee's execution may be observable if it handles active connections.
 
-Antes de inyectar, se lee `/proc/<pid>/maps` del proceso victima para entender su layout de memoria. Se identifican regiones ejecutables (donde RIP podria estar), regiones escribibles (alternativas para depositar el payload), y la presencia de librerias especificas (para resolver funciones dinamicamente).
+**After detach:**
+- `TracerPid` returns to 0.
+- The process state returns to normal.
+- Memory and registers were restored.
+- **No persistent evidence remains in the process.** Without active monitoring during the injection window, there is no artifact that a post-hoc analysis can find.
 
-### Ejecucion dinamica: mprotect
+### The temporal window
 
-Si se necesita inyectar un payload mas grande que el espacio disponible en la region actual de RIP, se puede usar `ptrace` para invocar `mmap` en el contexto de la victima (escribiendo un shellcode corto que llama a `mmap`, ejecutandolo, y luego escribiendo el payload real en la nueva region). Despues se usa `mprotect` para hacer esa region ejecutable.
+The detection window is the time between ATTACH and DETACH. For a small shellcode, this time can be microseconds. A defender not actively sampling `/proc/<pid>/status` at that precise interval will not detect the injection.
+
+This creates a fundamental asymmetry: the attacker controls the window's duration, and the defender needs to be observing during that specific window. The attacker needs to succeed once; the defender needs to be watching all the time.
+
+---
+
+## 5. Complete Attack Chain
+
+This technique does not exist in isolation. It represents the culmination of the primitives documented in this series, and its real power emerges when they are chained:
+
+### Reconnaissance: /proc/self/maps
+
+Before injecting, `/proc/<pid>/maps` of the victim process is read to understand its memory layout. Executable regions (where RIP could be), writable regions (alternatives for depositing the payload), and the presence of specific libraries (for resolving functions dynamically) are identified.
+
+### Dynamic execution: mprotect
+
+If a payload larger than the space available at the current RIP region needs to be injected, `ptrace` can be used to invoke `mmap` in the victim's context (writing a short shellcode that calls `mmap`, executing it, then writing the real payload in the new region). Then `mprotect` is used to make that region executable.
 
 ### Fileless delivery: memfd_create
 
-El payload final puede ser un ELF completo cargado via `memfd_create` dentro del proceso victima. Se inyecta un loader minimo que crea un memfd, escribe el ELF, y lo ejecuta con `execveat` o lo mapea en memoria. El binario del payload nunca toca disco.
+The final payload can be a complete ELF loaded via `memfd_create` inside the victim process. A minimal loader is injected that creates a memfd, writes the ELF, and executes it with `execveat` or maps it in memory. The payload binary never touches disk.
 
-### La cadena completa
+### The complete chain
 
-1. Leer `/proc/<pid>/maps` → reconocimiento del layout de memoria
-2. `ptrace ATTACH` → tomar control del proceso
-3. Inyectar un stub que llame a `mmap` → crear espacio para el payload
-4. `mprotect` la nueva region → hacerla ejecutable
-5. Escribir el payload real (o un loader de `memfd_create`) → depositar el codigo
-6. Modificar RIP → ejecutar el payload
-7. Restaurar y DETACH → no dejar rastro
+1. Read `/proc/<pid>/maps` → memory layout reconnaissance
+2. `ptrace ATTACH` → take control of the process
+3. Inject a stub that calls `mmap` → create space for the payload
+4. `mprotect` the new region → make it executable
+5. Write the real payload (or a `memfd_create` loader) → deposit the code
+6. Modify RIP → execute the payload
+7. Restore and DETACH → leave no trace
 
-Cada tecnica individualmente tiene un alcance limitado. Encadenadas, representan la capacidad de ejecutar un programa arbitrario dentro de un proceso legitimo sin que exista ningun archivo en disco ni ningun proceso nuevo visible.
+Each technique individually has limited scope. Chained together, they represent the capability to execute an arbitrary program inside a legitimate process without any file on disk or any new visible process.
 
 ---
 
-## 6. Perspectiva Defensiva
+## 6. Defensive Perspective
 
-### Deteccion en tiempo real
+### Real-time detection
 
-**Monitoreo de ptrace via auditd/eBPF:**
-La senal mas directa es la invocacion de `ptrace(ATTACH)` desde un proceso que no es un debugger conocido. Una regla de auditd que registre la syscall 101 con el argumento ATTACH (16) captura cada intento de inyeccion. El desafio es distinguir attach de debugging legitimo de attach malicioso — el contexto del proceso que invoca la syscall es la clave.
+**ptrace monitoring via auditd/eBPF:**
+The most direct signal is a `ptrace(ATTACH)` invocation from a process that is not a known debugger. An auditd rule that logs syscall 101 with argument ATTACH (16) captures every injection attempt. The challenge is distinguishing legitimate debugging attach from malicious attach — the context of the invoking process is key.
 
-**Escaneo periodico de TracerPid:**
-Un agente de seguridad que lea `/proc/<pid>/status` periodicamente puede detectar procesos siendo traceados. Si un servicio critico (sshd, nginx, un proceso de base de datos) tiene TracerPid distinto de cero y no hay una sesion de debugging conocida, la alerta es de alta prioridad.
+**Periodic TracerPid scanning:**
+A security agent that periodically reads `/proc/<pid>/status` can detect processes being traced. If a critical service (sshd, nginx, a database process) has a non-zero TracerPid and there is no known debugging session, the alert is high priority.
 
-**Monitoreo de estado de procesos:**
-El estado `t` (traced/stopped) en `/proc/<pid>/stat` indica tracing activo. Un proceso que transiciona a estado `t` sin que el administrador haya iniciado un debugger merece investigacion.
+**Process state monitoring:**
+The `t` (traced/stopped) state in `/proc/<pid>/stat` indicates active tracing. A process transitioning to state `t` without an administrator having started a debugger warrants investigation.
 
-### Prevencion
+### Prevention
 
 **Yama LSM (ptrace_scope):**
-El modulo Yama del kernel implementa restricciones sobre quien puede usar ptrace:
+The kernel's Yama module implements restrictions on who can use ptrace:
 
-- **Scope 0:** Sin restricciones. Cualquier proceso puede tracear cualquier otro del mismo UID.
-- **Scope 1:** Solo procesos descendientes directos. Un proceso solo puede tracear sus hijos.
-- **Scope 2:** Solo administradores con CAP_SYS_PTRACE.
-- **Scope 3:** ptrace completamente deshabilitado.
+- **Scope 0:** No restrictions. Any process can trace any other with the same UID.
+- **Scope 1:** Direct descendants only. A process can only trace its children.
+- **Scope 2:** Administrators with CAP_SYS_PTRACE only.
+- **Scope 3:** ptrace completely disabled.
 
-La mayoria de las distribuciones orientadas a servidores usan scope 1 por defecto. Scope 2 o 3 bloquea la tecnica para usuarios no privilegiados, pero tambien impide el debugging normal.
+Most server-oriented distributions use scope 1 by default. Scope 2 or 3 blocks the technique for unprivileged users, but also prevents normal debugging.
 
 **seccomp-bpf:**
-Un filtro seccomp puede bloquear `ptrace` completamente para procesos que no la necesitan. Los contenedores modernos (Docker, Kubernetes) ya aplican esto por defecto: el capability `SYS_PTRACE` se elimina del conjunto de capacidades del contenedor.
+A seccomp filter can block `ptrace` entirely for processes that do not need it. Modern containers (Docker, Kubernetes) already apply this by default: the `SYS_PTRACE` capability is removed from the container's capability set.
 
-**Namespaces de PID:**
-Si la victima potencial corre en un namespace de PID diferente al del atacante, `ptrace` no puede alcanzarla. El aislamiento de namespaces es una barrera efectiva contra la inyeccion entre contextos de ejecucion.
+**PID namespaces:**
+If the potential victim runs in a different PID namespace than the attacker, `ptrace` cannot reach it. Namespace isolation is an effective barrier against cross-context injection.
 
 **SELinux/AppArmor:**
-Ambos frameworks pueden definir politicas que restringen que procesos pueden ser traceados y por quien. Una politica bien configurada puede permitir que GDB tracee procesos del usuario pero denegar tracing entre servicios del sistema.
+Both frameworks can define policies that restrict which processes can be traced and by whom. A well-configured policy can allow GDB to trace user processes but deny tracing between system services.
 
-### La limitacion del enfoque defensivo
+### The limitation of the defensive approach
 
-El desafio fundamental es que `ptrace` es una herramienta critica del ecosistema. Los debuggers la necesitan. Los tracers de rendimiento la necesitan. Algunas herramientas de sandboxing la necesitan. Bloquearla completamente rompe flujos de trabajo de desarrollo y operaciones.
+The fundamental challenge is that `ptrace` is a critical ecosystem tool. Debuggers need it. Performance tracers need it. Some sandboxing tools need it. Blocking it entirely breaks development and operations workflows.
 
-La defensa efectiva no puede ser un interruptor binario (permitir/bloquear). Tiene que ser contextual: ¿quien esta invocando ptrace? ¿sobre que proceso? ¿en que circunstancia? Las respuestas a estas preguntas requieren politicas granulares y monitoreo activo, no reglas estaticas.
-
----
-
-## 7. Reflexion Final
-
-`ptrace` completa un arco que comenzo con la escritura de bytes en memoria propia y culmina con el control total de procesos ajenos. Cada paso en esta progresion — `mprotect`, `memfd_create`, `ptrace` — agrego una capacidad nueva, y cada capacidad fue proporcionada por el kernel a traves de interfaces publicas, documentadas, y disenadas para uso legitimo.
-
-La seguridad de un sistema no se puede evaluar mirando cada componente en aislamiento. `ptrace` es seguro en el contexto de debugging. `memfd_create` es seguro en el contexto de memoria compartida. `mprotect` es seguro en el contexto de compilacion JIT. Es la **composicion** de estas primitivas con intencion adversarial lo que genera la capacidad ofensiva.
-
-Un atacante no descubre vulnerabilidades en estas syscalls. Descubre que, combinadas de cierta manera, producen un efecto que los disenadores no anticiparon como caso de uso principal. El sistema funciona exactamente como fue especificado. La especificacion simplemente no contemplo todos los usos posibles.
+Effective defense cannot be a binary switch (allow/block). It must be contextual: who is invoking ptrace? On which process? Under what circumstances? The answers to these questions require granular policies and active monitoring, not static rules.
 
 ---
 
-*Investigacion realizada como parte del proyecto [Black Hat Zig](https://github.com/JorgeBeritan) — documentacion de tecnicas ofensivas a nivel de syscall en Linux.*
+## 7. Final Reflection
+
+`ptrace` completes an arc that began with writing bytes to one's own memory and culminates in total control of foreign processes. Each step in this progression — `mprotect`, `memfd_create`, `ptrace` — added a new capability, and each capability was provided by the kernel through public, documented interfaces designed for legitimate use.
+
+A system's security cannot be evaluated by looking at each component in isolation. `ptrace` is safe in the context of debugging. `memfd_create` is safe in the context of shared memory. `mprotect` is safe in the context of JIT compilation. It is the **composition** of these primitives with adversarial intent that generates the offensive capability.
+
+An attacker does not discover vulnerabilities in these syscalls. They discover that, combined in a certain way, they produce an effect that the designers did not anticipate as a primary use case. The system works exactly as specified. The specification simply did not contemplate all possible uses.
+
+---
+
+*Research conducted as part of the [Black Hat Zig](https://github.com/JorgeBeritan) project — documentation of offensive techniques at the syscall level on Linux.*

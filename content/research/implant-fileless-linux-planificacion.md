@@ -1,7 +1,7 @@
 ---
-title: "Planificacion: Implant Fileless para Linux"
+title: "Planning: Fileless Implant for Linux"
 date: 2026-10-14
-description: "Arquitectura y diseno de un implant fileless con capacidad de migracion usando exclusivamente syscalls directas en Zig."
+description: "Architecture and design of a fileless implant with migration capability using exclusively direct syscalls in Zig."
 tags: ["linux", "syscalls", "implant", "fileless", "zig", "offensive-security", "architecture"]
 series: ["Linux Offensive Primitives"]
 cover:
@@ -12,198 +12,198 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisitos:** [mprotect como Vector de Ataque](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create y Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace e Inyeccion de Procesos](/research/ptrace-inyeccion-de-procesos-en-linux/)
+**Prerequisites:** [mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create and Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace and Process Injection](/research/ptrace-inyeccion-de-procesos-en-linux/)
 
 ---
 
-## 1. Motivacion
+## 1. Motivation
 
-A lo largo de esta serie se implementaron cuatro tecnicas de forma aislada: syscalls directas, inspeccion de memoria via `/proc`, ejecucion dinamica con `mprotect`, ejecucion sin archivo con `memfd_create`, e inyeccion de procesos con `ptrace`. Cada una demostro una capacidad individual.
+Throughout this series, four techniques were implemented in isolation: direct syscalls, memory inspection via `/proc`, dynamic execution with `mprotect`, fileless execution with `memfd_create`, and process injection with `ptrace`. Each demonstrated an individual capability.
 
-Este documento de planificacion responde una pregunta natural: **¿que sucede cuando estas primitivas se componen en una sola herramienta?**
+This planning document answers a natural question: **what happens when these primitives are composed into a single tool?**
 
-El resultado es un implant — un programa que mantiene acceso persistente a un sistema, ejecuta comandos, y resiste la deteccion. No como concepto teorico: como codigo funcional donde cada componente utiliza exclusivamente las primitivas que ya se implementaron y documentaron.
-
----
-
-## 2. Principios de Diseno
-
-### 2.1 Cero dependencia de libc
-
-El implant no invoca funciones de libc en ningun momento. Toda operacion pasa por syscalls directas usando `std.os.linux.syscallN`. El proposito es operacional concreto:
-
-- **LD_PRELOAD no puede interceptarlo.** Un defensor que hookee `write()`, `connect()`, o `execve()` via LD_PRELOAD no ve nada porque el implant nunca llama a esas funciones de libc. Llama directamente al kernel.
-- **Las herramientas de tracing basadas en libc no lo detectan.** `ltrace` instrumenta llamadas a librerias compartidas. Si no hay llamadas a librerias compartidas, `ltrace` no reporta nada.
-- **Reduce la superficie de deteccion.** Menos dependencias significa menos puntos donde un EDR puede insertar hooks.
-
-### 2.2 Sin presencia en disco
-
-El binario del implant nunca existe como archivo en el filesystem. Se carga y ejecuta exclusivamente a traves de `memfd_create` + `execve` via `/proc/self/fd/N`. La unica presencia persistente es en la memoria del proceso.
-
-### 2.3 Capacidad de migracion
-
-El implant puede transferir su ejecucion a otro proceso mediante `ptrace`. Esto significa que incluso si el proceso original que lo cargo es terminado, el implant puede continuar operando dentro de un proceso legitimo del sistema.
-
-### 2.4 Comunicacion directa
-
-La conexion al C2 se establece usando syscalls de socket directas (`socket`, `connect`, `read`, `write`). No se utiliza la capa de red de la stdlib de Zig.
+The result is an implant — a program that maintains persistent access to a system, executes commands, and resists detection. Not as a theoretical concept: as functional code where every component uses exclusively the primitives already implemented and documented.
 
 ---
 
-## 3. Arquitectura
+## 2. Design Principles
 
-El sistema se compone de tres piezas independientes:
+### 2.1 Zero libc dependency
+
+The implant never invokes libc functions. Every operation goes through direct syscalls using `std.os.linux.syscallN`. The purpose is concretely operational:
+
+- **LD_PRELOAD cannot intercept it.** A defender hooking `write()`, `connect()`, or `execve()` via LD_PRELOAD sees nothing because the implant never calls those libc functions. It calls the kernel directly.
+- **libc-based tracing tools do not detect it.** `ltrace` instruments calls to shared libraries. If there are no shared library calls, `ltrace` reports nothing.
+- **Reduced detection surface.** Fewer dependencies means fewer points where an EDR can insert hooks.
+
+### 2.2 No disk presence
+
+The implant binary never exists as a file on the filesystem. It is loaded and executed exclusively through `memfd_create` + `execve` via `/proc/self/fd/N`. The only persistent presence is in process memory.
+
+### 2.3 Migration capability
+
+The implant can transfer its execution to another process via `ptrace`. This means that even if the original process that loaded it is terminated, the implant can continue operating inside a legitimate system process.
+
+### 2.4 Direct communication
+
+The C2 connection is established using direct socket syscalls (`socket`, `connect`, `read`, `write`). Zig's stdlib network layer is not used.
+
+---
+
+## 3. Architecture
+
+The system is composed of three independent pieces:
 
 ### 3.1 Loader (dropper)
 
-**Responsabilidad:** Cargar el implant en memoria y ejecutarlo sin tocar disco.
+**Responsibility:** Load the implant into memory and execute it without touching disk.
 
-**Flujo:**
-1. Contiene el binario del implant embebido en tiempo de compilacion (`@embedFile`)
-2. Crea un memfd con `memfd_create`
-3. Escribe el ELF del implant al memfd
-4. Ejecuta via `execve("/proc/self/fd/N")`
-5. El proceso del loader se reemplaza completamente por el implant
+**Flow:**
+1. Contains the implant binary embedded at compile time (`@embedFile`)
+2. Creates a memfd with `memfd_create`
+3. Writes the implant ELF to the memfd
+4. Executes via `execve("/proc/self/fd/N")`
+5. The loader process is completely replaced by the implant
 
-**Caracteristica clave:** Despues de `execve`, el loader deja de existir. El proceso que queda corriendo ES el implant, pero cargado desde memoria. Si un investigador lista procesos, ve un proceso sin binario en disco asociado.
+**Key characteristic:** After `execve`, the loader ceases to exist. The running process IS the implant, but loaded from memory. If an investigator lists processes, they see a process with no associated binary on disk.
 
-### 3.2 Implant (nucleo)
+### 3.2 Implant (core)
 
-**Responsabilidad:** Mantener comunicacion con el C2, ejecutar comandos, y persistir en el sistema.
+**Responsibility:** Maintain C2 communication, execute commands, and persist on the system.
 
-**Capacidades:**
+**Capabilities:**
 
-| Comando | Que hace | Syscalls involucradas |
+| Command | What it does | Syscalls involved |
 |---|---|---|
-| `info` | Reporta PID, UID, hostname, directorio de trabajo | `getpid`, `getuid`, `uname`, `getcwd` |
-| `exec <cmd>` | Ejecuta un comando y retorna el output | `fork`, `execve`, `pipe`, `read`, `wait4` |
-| `maps` | Lee y envia `/proc/self/maps` del proceso actual | `openat`, `read`, `close` |
-| `migrate <pid>` | Inyecta el implant en otro proceso via ptrace | `ptrace`, `wait4` |
-| `exit` | Cierra la conexion y termina limpiamente | `close`, `exit` |
+| `info` | Reports PID, UID, hostname, working directory | `getpid`, `getuid`, `uname`, `getcwd` |
+| `exec <cmd>` | Executes a command and returns output | `fork`, `execve`, `pipe`, `read`, `wait4` |
+| `maps` | Reads and sends `/proc/self/maps` of the current process | `openat`, `read`, `close` |
+| `migrate <pid>` | Injects the implant into another process via ptrace | `ptrace`, `wait4` |
+| `exit` | Closes the connection and terminates cleanly | `close`, `exit` |
 
-**Flujo de ejecucion principal:**
-1. Establece conexion TCP reversa al C2 (`socket` → `connect`)
-2. Entra en un loop de recepcion de comandos
-3. Parsea cada comando recibido
-4. Ejecuta la operacion correspondiente
-5. Envia el resultado al C2 por el mismo socket
-6. Repite hasta recibir `exit`
+**Main execution flow:**
+1. Establishes a reverse TCP connection to the C2 (`socket` → `connect`)
+2. Enters a command reception loop
+3. Parses each received command
+4. Executes the corresponding operation
+5. Sends the result to the C2 over the same socket
+6. Repeats until `exit` is received
 
 ### 3.3 C2 Listener
 
-**Responsabilidad:** Recibir la conexion del implant y proveer una interfaz de comandos.
+**Responsibility:** Receive the implant's connection and provide a command interface.
 
-**Implementacion:** Para la primera version, `netcat` (`nc -lvp <puerto>`) es suficiente. El protocolo es texto plano sobre TCP. En una version posterior, se puede implementar un C2 dedicado en Zig con soporte para multiples sesiones, encriptacion, y un protocolo binario.
-
----
-
-## 4. Perspectiva Ofensiva
-
-### Ventajas operacionales
-
-**Invisibilidad en disco:** El antivirus basado en firmas escanea archivos en el filesystem. Si no hay archivo, no hay firma que matchear. El implant existe solo en memoria, donde la mayoria de los AV tradicionales no buscan.
-
-**Evasion de hooks de userspace:** Las herramientas de monitoreo que operan a nivel de libc (LD_PRELOAD hooks, library interposition) no ven las operaciones del implant. Solo `strace` (que usa ptrace sobre el proceso) o instrumentacion a nivel de kernel (eBPF, kprobes) pueden observar las syscalls directas.
-
-**Migracion entre procesos:** Si el proceso original es sospechoso o esta a punto de ser terminado, el implant puede migrar a un proceso del sistema (`sshd`, `cron`, `apache2`). Despues de la migracion, la actividad de red y de ejecucion de comandos se atribuye al proceso legitimo, no al implant.
-
-**Bajo footprint:** Un implant escrito en Zig con `ReleaseSmall` y sin stdlib de red pesa pocos kilobytes. Menos bytes en memoria significa menos probabilidad de deteccion por escaneo de memoria.
-
-### Limitaciones
-
-**strace lo ve todo.** Un administrador que corra `strace -p <pid>` sobre el proceso del implant ve cada syscall en tiempo real. No hay forma de evitar esto desde userspace sin rootkit a nivel de kernel.
-
-**eBPF lo ve todo.** Los probes de eBPF se ejecutan dentro del kernel. No importa si el implant usa libc o syscalls directas — el kernel ve ambas. Un sistema con buena telemetria de eBPF detecta la actividad.
-
-**`/proc/<pid>/exe` lo delata.** El link simbolico apunta a `memfd:nombre` o muestra `(deleted)`. Este es un indicador forense solido de fileless execution.
-
-**La conexion de red es visible.** `ss` y `netstat` muestran la conexion TCP establecida. El trafico puede ser capturado con `tcpdump`. Sin encriptacion y sin tunelizado, el contenido de los comandos viaja en texto plano.
+**Implementation:** For the first version, `netcat` (`nc -lvp <port>`) is sufficient. The protocol is plaintext over TCP. In a later version, a dedicated C2 in Zig can be implemented with support for multiple sessions, encryption, and a binary protocol.
 
 ---
 
-## 5. Perspectiva Defensiva
+## 4. Offensive Perspective
 
-### Indicadores de compromiso
+### Operational advantages
 
-| Indicador | Donde buscarlo | Confiabilidad |
+**Disk invisibility:** Signature-based antivirus scans files on the filesystem. If there is no file, there is no signature to match. The implant exists only in memory, where most traditional AVs do not look.
+
+**Userspace hook evasion:** Monitoring tools operating at the libc level (LD_PRELOAD hooks, library interposition) do not see the implant's operations. Only `strace` (which uses ptrace on the process) or kernel-level instrumentation (eBPF, kprobes) can observe the direct syscalls.
+
+**Process migration:** If the original process is suspicious or about to be terminated, the implant can migrate to a system process (`sshd`, `cron`, `apache2`). After migration, network activity and command execution are attributed to the legitimate process, not the implant.
+
+**Low footprint:** An implant written in Zig with `ReleaseSmall` and no network stdlib weighs a few kilobytes. Fewer bytes in memory means lower probability of detection by memory scanning.
+
+### Limitations
+
+**strace sees everything.** An administrator running `strace -p <pid>` on the implant's process sees every syscall in real time. There is no way to avoid this from userspace without a kernel-level rootkit.
+
+**eBPF sees everything.** eBPF probes execute inside the kernel. It does not matter whether the implant uses libc or direct syscalls — the kernel sees both. A system with good eBPF telemetry detects the activity.
+
+**`/proc/<pid>/exe` betrays it.** The symbolic link points to `memfd:name` or shows `(deleted)`. This is a solid forensic indicator of fileless execution.
+
+**The network connection is visible.** `ss` and `netstat` show the established TCP connection. Traffic can be captured with `tcpdump`. Without encryption and without tunneling, command contents travel in plaintext.
+
+---
+
+## 5. Defensive Perspective
+
+### Indicators of compromise
+
+| Indicator | Where to look | Reliability |
 |---|---|---|
-| `/proc/<pid>/exe` apunta a `memfd:*` | Escaneo periodico de `/proc/*/exe` | Alta |
-| Conexion TCP saliente a IP/puerto inusual | `ss -tnp`, logs de firewall | Media |
-| Proceso sin `libc` en maps pero con actividad de red | `/proc/<pid>/maps` | Media-alta |
-| `ptrace` ATTACH desde proceso no-debugger | auditd, eBPF hooks en syscall 101 | Alta |
-| `fork`+`execve` desde proceso que normalmente no ejecuta | Monitoreo comportamental | Media |
+| `/proc/<pid>/exe` points to `memfd:*` | Periodic scan of `/proc/*/exe` | High |
+| Outbound TCP connection to unusual IP/port | `ss -tnp`, firewall logs | Medium |
+| Process without `libc` in maps but with network activity | `/proc/<pid>/maps` | Medium-high |
+| `ptrace` ATTACH from non-debugger process | auditd, eBPF hooks on syscall 101 | High |
+| `fork`+`execve` from process that normally does not execute | Behavioral monitoring | Medium |
 
-### Reglas de deteccion propuestas
+### Proposed detection rules
 
 **auditd:**
-- Monitorear `memfd_create` (syscall 319) — cualquier invocacion merece registro
-- Monitorear `execveat` (syscall 322) y `execve` donde el path contenga `/proc/self/fd/`
-- Monitorear `ptrace` ATTACH (syscall 101, primer arg = 16) desde procesos no-debugger
+- Monitor `memfd_create` (syscall 319) — any invocation warrants logging
+- Monitor `execveat` (syscall 322) and `execve` where the path contains `/proc/self/fd/`
+- Monitor `ptrace` ATTACH (syscall 101, first arg = 16) from non-debugger processes
 
 **eBPF:**
-- Tracepoint en `sys_enter_memfd_create` → registrar proceso y nombre del memfd
-- Tracepoint en `sys_enter_execve` → alertar si path matchea `/proc/*/fd/*` o `/memfd:*`
-- Correlacionar: si el mismo PID hace `memfd_create` seguido de `execve` con fd path, es fileless execution con alta probabilidad
+- Tracepoint on `sys_enter_memfd_create` → log process and memfd name
+- Tracepoint on `sys_enter_execve` → alert if path matches `/proc/*/fd/*` or `/memfd:*`
+- Correlate: if the same PID performs `memfd_create` followed by `execve` with an fd path, it is fileless execution with high probability
 
-**Escaneo periodico:**
-- Recorrer `/proc/*/exe` buscando entries que contengan "memfd" o "(deleted)" sin un binario correspondiente en disco
-- Comparar `/proc/<pid>/maps` con las librerias esperadas para ese tipo de proceso
+**Periodic scanning:**
+- Walk `/proc/*/exe` looking for entries containing "memfd" or "(deleted)" without a corresponding binary on disk
+- Compare `/proc/<pid>/maps` with expected libraries for that process type
 
-### Mitigacion
+### Mitigation
 
-- **seccomp-bpf:** Bloquear `memfd_create` y `ptrace` para procesos que no los necesitan
-- **Yama ptrace_scope = 2 o 3:** Restringir ptrace a CAP_SYS_PTRACE o deshabilitarlo completamente
-- **SELinux/AppArmor:** Politicas que restrinjan ejecucion desde memfd y tracing entre procesos
-- **Network segmentation:** Detectar y bloquear conexiones salientes no autorizadas en el firewall perimetral
-
----
-
-## 6. Plan de Desarrollo Incremental
-
-### Fase 1 — Implant core (conexion + comandos basicos)
-- Socket TCP reverso via syscalls directas
-- Comando `info` (PID, UID, hostname)
-- Comando `exec` (fork + execve + captura de output)
-- Probar con `netcat` como C2
-
-### Fase 2 — Reconocimiento
-- Comando `maps` (leer /proc/self/maps y enviarlo)
-- Comando `ls` / `pwd` via syscalls directas
-
-### Fase 3 — Fileless delivery
-- Compilar el implant como binario separado
-- Implementar el loader con `memfd_create`
-- Integrar y probar el flujo completo: loader → memfd → implant corriendo
-
-### Fase 4 — Migracion
-- Comando `migrate <pid>` usando ptrace injection
-- Guardar y restaurar estado del proceso victima
-- Verificar que la victima continua ejecutando normalmente post-migracion
-
-### Fase 5 — Integracion y hardening
-- Probar todos los flujos end-to-end
-- Optimizar tamanio del binario (`ReleaseSmall`)
+- **seccomp-bpf:** Block `memfd_create` and `ptrace` for processes that do not need them
+- **Yama ptrace_scope = 2 or 3:** Restrict ptrace to CAP_SYS_PTRACE or disable it entirely
+- **SELinux/AppArmor:** Policies restricting execution from memfd and tracing between processes
+- **Network segmentation:** Detect and block unauthorized outbound connections at the perimeter firewall
 
 ---
 
-## 7. Estructura de Archivos
+## 6. Incremental Development Plan
+
+### Phase 1 — Implant core (connection + basic commands)
+- Reverse TCP socket via direct syscalls
+- `info` command (PID, UID, hostname)
+- `exec` command (fork + execve + output capture)
+- Test with `netcat` as C2
+
+### Phase 2 — Reconnaissance
+- `maps` command (read /proc/self/maps and send it)
+- `ls` / `pwd` via direct syscalls
+
+### Phase 3 — Fileless delivery
+- Compile the implant as a separate binary
+- Implement the loader with `memfd_create`
+- Integrate and test the complete flow: loader → memfd → implant running
+
+### Phase 4 — Migration
+- `migrate <pid>` command using ptrace injection
+- Save and restore victim process state
+- Verify the victim continues executing normally post-migration
+
+### Phase 5 — Integration and hardening
+- Test all flows end-to-end
+- Optimize binary size (`ReleaseSmall`)
+
+---
+
+## 7. File Structure
 
 ```
 05-fileless-implant/
 ├── implant/
 │   ├── build.zig
 │   └── src/
-│       └── main.zig          # Nucleo del implant
+│       └── main.zig          # Implant core
 ├── loader/
 │   ├── build.zig
 │   └── src/
-│       └── main.zig          # Loader con memfd_create
+│       └── main.zig          # Loader with memfd_create
 └── c2/
     ├── build.zig
     └── src/
-        └── main.zig          # Listener (fase posterior)
+        └── main.zig          # Listener (later phase)
 ```
 
 ---
 
-*Documento de planificacion para el proyecto [Black Hat Zig](https://github.com/JorgeBeritan) — implementacion de tecnicas ofensivas a nivel de syscall en Linux.*
+*Planning document for the [Black Hat Zig](https://github.com/JorgeBeritan) project — implementation of offensive techniques at the syscall level on Linux.*

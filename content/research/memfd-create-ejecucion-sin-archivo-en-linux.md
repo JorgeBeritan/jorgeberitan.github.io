@@ -1,7 +1,7 @@
 ---
-title: "Ejecucion Sin Archivo en Linux: memfd_create como Primitiva de Fileless Execution"
+title: "Fileless Execution on Linux: memfd_create as a Primitive"
 date: 2026-10-10
-description: "Uso de memfd_create para ejecutar binarios ELF completos sin que estos existan como archivos en el filesystem."
+description: "Using memfd_create to execute complete ELF binaries without them ever existing as files on the filesystem."
 tags: ["linux", "syscalls", "memfd_create", "fileless", "offensive-security"]
 series: ["Linux Offensive Primitives"]
 cover:
@@ -12,158 +12,158 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisito:** [Ejecucion Dinamica de Codigo: mprotect como Vector de Ataque](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/)
+**Prerequisite:** [Dynamic Code Execution: mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/)
 
 ---
 
-## Resumen
+## Summary
 
-Esta investigacion documenta el uso de la syscall `memfd_create` como primitiva para ejecutar binarios ELF completos sin que estos existan como archivos en el filesystem. La tecnica representa una evolucion natural respecto a la ejecucion dinamica de shellcode via `mprotect` documentada anteriormente: donde aquella tecnica permite ejecutar fragmentos de codigo maquina desde memoria, esta permite ejecutar **programas completos** sin dejar rastro en disco. Se analiza el mecanismo tecnico, su relacion con tecnicas analogas en Windows, y las estrategias de deteccion disponibles.
-
----
-
-## 1. El Problema
-
-La ejecucion de codigo via `mprotect` tiene una limitacion practica: el payload es shellcode crudo. Para operaciones complejas (persistencia, movimiento lateral, exfiltracion), se necesita ejecutar programas completos, no fragmentos de codigo maquina.
-
-La ruta convencional para ejecutar un programa en Linux es:
-
-1. Escribir el binario a disco.
-2. Llamar a `execve` con la ruta del archivo.
-
-El problema es evidente: el paso 1 deja un artefacto en el filesystem. Un archivo en disco puede ser escaneado por un antivirus, detectado por file integrity monitoring (AIDE, OSSEC, Tripwire), registrado por auditd, y recuperado en un analisis forense incluso despues de ser eliminado.
-
-La pregunta es directa: **¿es posible ejecutar un programa sin que exista como archivo en disco en ningun momento?**
+This research documents the use of the `memfd_create` syscall as a primitive for executing complete ELF binaries without them ever existing as files on the filesystem. The technique represents a natural evolution from the dynamic shellcode execution via `mprotect` documented previously: where that technique allows executing fragments of machine code from memory, this one allows executing **complete programs** without leaving a trace on disk. The technical mechanism, its relationship to analogous techniques on Windows, and available detection strategies are analyzed.
 
 ---
 
-## 2. La Primitiva: memfd_create
+## 1. The Problem
 
-### Origen y proposito legitimo
+Code execution via `mprotect` has a practical limitation: the payload is raw shellcode. For complex operations (persistence, lateral movement, exfiltration), complete programs need to be executed, not machine code fragments.
 
-`memfd_create` fue introducida en Linux 3.17 (2014). Su proposito original es crear **archivos anonimos respaldados por memoria**. A diferencia de un archivo tradicional que reside en un filesystem montado, un memfd existe unicamente como un objeto del kernel en RAM.
+The conventional route for executing a program on Linux is:
 
-Los casos de uso legitimos incluyen:
+1. Write the binary to disk.
+2. Call `execve` with the file path.
 
-- **Memoria compartida entre procesos:** Mas seguro que `/dev/shm` porque el fd puede sellarse con `F_SEAL` para prevenir modificaciones.
-- **Archivos temporales sin riesgo de colision:** No necesitan un directorio temporal ni un nombre unico.
-- **Contenedores y sandboxing:** Sistemas como Docker y Flatpak los usan para pasar datos entre procesos aislados.
+The problem is obvious: step 1 leaves an artifact on the filesystem. A file on disk can be scanned by antivirus, detected by file integrity monitoring (AIDE, OSSEC, Tripwire), logged by auditd, and recovered in forensic analysis even after deletion.
 
-La syscall recibe dos argumentos: un nombre de debug (visible en `/proc/<pid>/fd/`) y flags opcionales. Retorna un file descriptor que se comporta como cualquier otro fd: se puede leer, escribir, mapear, y — criticamente — se puede pasar a `execveat` para ejecucion.
-
-### La propiedad clave
-
-Un memfd **no tiene entrada en ningun directorio del filesystem**. No existe en `/tmp`, no existe en `/dev/shm`, no existe en ningun punto de montaje. La unica forma de accederlo es a traves del file descriptor dentro del proceso que lo creo, o a traves de la entrada virtual `/proc/<pid>/fd/<N>` mientras el proceso esta vivo.
-
-Si el proceso termina y ningun otro proceso heredo el fd, el memfd desaparece completamente. No hay nada que recuperar de disco porque nunca estuvo en disco.
+The question is direct: **is it possible to execute a program without it ever existing as a file on disk?**
 
 ---
 
-## 3. El Mecanismo: De Bytes en Memoria a Proceso en Ejecucion
+## 2. The Primitive: memfd_create
 
-### Fase 1 — Creacion del contenedor
+### Origin and legitimate purpose
 
-Se invoca `memfd_create` para obtener un fd anonimo. El flag `MFD_CLOEXEC` se aplica para que el fd se cierre automaticamente al ejecutar `execveat`. Esto es una medida de higiene: si el fd sobrevive al exec, el proceso hijo lo hereda y un investigador podria encontrarlo listando `/proc/<pid>/fd/`.
+`memfd_create` was introduced in Linux 3.17 (2014). Its original purpose is to create **anonymous memory-backed files**. Unlike a traditional file that resides on a mounted filesystem, a memfd exists solely as a kernel object in RAM.
 
-### Fase 2 — Carga del payload
+Legitimate use cases include:
 
-El contenido de un binario ELF se escribe en el memfd usando la syscall `write`, exactamente como se escribiria a un archivo normal. El payload puede provenir de multiples fuentes: estar embebido en el propio loader, descargado de la red, desencriptado en runtime, o recibido a traves de un socket.
+- **Shared memory between processes:** Safer than `/dev/shm` because the fd can be sealed with `F_SEAL` to prevent modifications.
+- **Temporary files without collision risk:** No need for a temp directory or a unique name.
+- **Containers and sandboxing:** Systems like Docker and Flatpak use them to pass data between isolated processes.
 
-Lo relevante es que la escritura ocurre a un objeto de memoria del kernel, no a un bloque en un dispositivo de almacenamiento. No hay sector de disco que registre la operacion, no hay journal de filesystem que la persista, no hay cache de pagina vinculado a un inode en un dispositivo fisico.
+The syscall takes two arguments: a debug name (visible in `/proc/<pid>/fd/`) and optional flags. It returns a file descriptor that behaves like any other fd: it can be read, written, mapped, and — critically — passed to `execveat` for execution.
 
-### Fase 3 — Ejecucion
+### The key property
 
-La syscall `execveat` (numero 322 en x86_64) es la variante moderna de `execve` que acepta un file descriptor en lugar de una ruta. Con el flag `AT_EMPTY_PATH`, le indica al kernel: "ejecuta el contenido referenciado por este fd, no busques ningun path".
+A memfd **has no entry in any filesystem directory**. It does not exist in `/tmp`, does not exist in `/dev/shm`, does not exist on any mount point. The only way to access it is through the file descriptor within the process that created it, or through the virtual entry `/proc/<pid>/fd/<N>` while the process is alive.
 
-El kernel procede exactamente como lo haria con un `execve` normal: verifica que el contenido es un ELF valido, carga los segmentos en memoria, configura el stack, y transfiere el control al entry point del programa. La unica diferencia es que el backing store del ELF es un objeto de memoria anonimo en vez de un archivo en un filesystem.
-
-Desde la perspectiva del kernel, la operacion es completamente ordinaria. La distincion entre "archivo en disco" y "archivo en memoria" es una cuestion de backend de almacenamiento, no de legitimidad de la operacion.
+If the process terminates and no other process inherited the fd, the memfd disappears completely. There is nothing to recover from disk because it was never on disk.
 
 ---
 
-## 4. Comparacion con Tecnicas Analogas en Windows
+## 3. The Mechanism: From Bytes in Memory to Running Process
 
-El ecosistema Windows tiene tecnicas con objetivos similares que resultan instructivas en comparacion.
+### Phase 1 — Container creation
+
+`memfd_create` is invoked to obtain an anonymous fd. The `MFD_CLOEXEC` flag is applied so the fd closes automatically upon `execveat`. This is an operational hygiene measure: if the fd survives the exec, the child process inherits it and an investigator could find it by listing `/proc/<pid>/fd/`.
+
+### Phase 2 — Payload loading
+
+The contents of an ELF binary are written to the memfd using the `write` syscall, exactly as one would write to a normal file. The payload can come from multiple sources: embedded in the loader itself, downloaded from the network, decrypted at runtime, or received through a socket.
+
+What matters is that the write occurs to a kernel memory object, not to a block on a storage device. No disk sector records the operation, no filesystem journal persists it, no page cache is linked to an inode on a physical device.
+
+### Phase 3 — Execution
+
+The `execveat` syscall (number 322 on x86_64) is the modern variant of `execve` that accepts a file descriptor instead of a path. With the `AT_EMPTY_PATH` flag, it tells the kernel: "execute the content referenced by this fd, do not look up any path."
+
+The kernel proceeds exactly as it would with a normal `execve`: verifies the content is a valid ELF, loads segments into memory, configures the stack, and transfers control to the program's entry point. The only difference is that the ELF's backing store is an anonymous memory object instead of a file on a filesystem.
+
+From the kernel's perspective, the operation is completely ordinary. The distinction between "file on disk" and "file in memory" is a question of storage backend, not of operation legitimacy.
+
+---
+
+## 4. Comparison with Analogous Windows Techniques
+
+The Windows ecosystem has techniques with similar goals that are instructive in comparison.
 
 ### Process Herpaderping
 
-Explota la separacion temporal entre la creacion de una seccion de memoria (NtCreateSection) y el escaneo del archivo por el software de seguridad. Se mapea el archivo como seccion, luego se sobrescribe el contenido del archivo en disco con datos benignos antes de que el AV lo inspeccione. El proceso ejecuta el contenido original, pero el archivo en disco muestra contenido inofensivo.
+Exploits the temporal separation between creating a memory section (NtCreateSection) and the security software scanning the file. The file is mapped as a section, then the file content on disk is overwritten with benign data before the AV inspects it. The process executes the original content, but the file on disk shows harmless content.
 
 ### Process Ghosting
 
-Similar a Herpaderping pero mas agresivo: despues de mapear la seccion, el archivo se marca para eliminacion (delete-pending state) y se cierra el handle. El archivo desaparece del filesystem, pero la seccion permanece valida en memoria.
+Similar to Herpaderping but more aggressive: after mapping the section, the file is marked for deletion (delete-pending state) and the handle is closed. The file disappears from the filesystem, but the section remains valid in memory.
 
-### La diferencia fundamental
+### The fundamental difference
 
-Tanto Herpaderping como Ghosting dependen de una peculiaridad arquitectural de Windows: la creacion de procesos es un flujo de multiples pasos con estados intermedios explotables. El archivo existe en disco al menos brevemente — lo suficiente para mapearlo como seccion.
+Both Herpaderping and Ghosting depend on an architectural quirk of Windows: process creation is a multi-step flow with exploitable intermediate states. The file exists on disk at least briefly — long enough to map it as a section.
 
-`memfd_create` en Linux es conceptualmente mas limpio: **el archivo nunca toca disco en ningun momento**. No hay ventana temporal de escaneo porque no hay artefacto en el filesystem que escanear. No se explota un gap entre pasos — se usa una primitiva disenada para operar exclusivamente en memoria.
+`memfd_create` on Linux is conceptually cleaner: **the file never touches disk at any point**. There is no scanning time window because there is no filesystem artifact to scan. No gap between steps is exploited — a primitive designed to operate exclusively in memory is used.
 
-La diferencia refleja las filosofias de diseno de ambos sistemas. Windows ofrece un modelo de creacion de procesos complejo con multiples capas de abstraccion, y la complejidad genera superficie de ataque en las transiciones entre capas. Linux ofrece primitivas simples y directas, y la superficie de ataque emerge de la potencia inherente de esas primitivas.
+The difference reflects the design philosophies of both systems. Windows offers a complex process creation model with multiple abstraction layers, and complexity generates attack surface in the transitions between layers. Linux offers simple, direct primitives, and the attack surface emerges from the inherent power of those primitives.
 
 ---
 
-## 5. Indicadores y Deteccion
+## 5. Indicators and Detection
 
-### Que ve el defensor
+### What the defender sees
 
-**En `/proc/<pid>/fd/`:**
-Mientras el loader tiene el memfd abierto (antes de `execveat`), el fd aparece como un enlace simbolico a `memfd:<nombre>`. El nombre es el que se paso a `memfd_create`. Despues de `execveat` con `MFD_CLOEXEC`, el fd desaparece.
+**In `/proc/<pid>/fd/`:**
+While the loader has the memfd open (before `execveat`), the fd appears as a symbolic link to `memfd:<name>`. The name is what was passed to `memfd_create`. After `execveat` with `MFD_CLOEXEC`, the fd disappears.
 
-**En `/proc/<pid>/exe`:**
-Aqui hay un indicador fuerte. Normalmente, `/proc/<pid>/exe` apunta al binario en disco que se ejecuto (por ejemplo, `/usr/bin/ls`). Para un proceso lanzado desde un memfd, apunta a una ruta virtual como `/memfd:<nombre> (deleted)`. La presencia de "memfd" en esta ruta es una senal clara de fileless execution.
+**In `/proc/<pid>/exe`:**
+Here is a strong indicator. Normally, `/proc/<pid>/exe` points to the on-disk binary that was executed (e.g., `/usr/bin/ls`). For a process launched from a memfd, it points to a virtual path like `/memfd:<name> (deleted)`. The presence of "memfd" in this path is a clear signal of fileless execution.
 
-**En los logs de auditd:**
-La syscall `memfd_create` puede registrarse con una regla de auditoria. La combinacion `memfd_create` seguida de `execveat` en el mismo proceso es altamente sospechosa y practicamente nunca ocurre en uso legitimo normal.
+**In auditd logs:**
+The `memfd_create` syscall can be logged with an audit rule. The combination of `memfd_create` followed by `execveat` in the same process is highly suspicious and virtually never occurs in normal legitimate use.
 
-### Estrategias de deteccion
+### Detection strategies
 
-**Monitoreo de `/proc/<pid>/exe`:**
-Cualquier proceso cuyo enlace `exe` contenga "memfd" merece investigacion inmediata. Herramientas de EDR pueden escanear periodicamente esta ruta para todos los procesos activos. Este es el indicador mas confiable y dificil de evadir.
+**Monitoring `/proc/<pid>/exe`:**
+Any process whose `exe` link contains "memfd" warrants immediate investigation. EDR tools can periodically scan this path for all active processes. This is the most reliable and hardest-to-evade indicator.
 
-**Reglas de auditd/eBPF:**
-Monitorear invocaciones de `memfd_create` (syscall 319) y `execveat` (syscall 322). La correlacion de ambas en el mismo proceso, especialmente si `execveat` usa `AT_EMPTY_PATH`, indica fileless execution con alta probabilidad.
+**auditd/eBPF rules:**
+Monitor invocations of `memfd_create` (syscall 319) and `execveat` (syscall 322). Correlation of both in the same process, especially if `execveat` uses `AT_EMPTY_PATH`, indicates fileless execution with high probability.
 
-**Analisis de contenido del memfd:**
-Mientras el memfd existe, su contenido puede ser leido a traves de `/proc/<pid>/fd/<N>`. Un respondedor de incidentes puede capturar el payload antes de que el proceso termine y el memfd desaparezca. Esto requiere deteccion en tiempo real — una vez que el proceso muere, la evidencia se pierde.
+**memfd content analysis:**
+While the memfd exists, its contents can be read through `/proc/<pid>/fd/<N>`. An incident responder can capture the payload before the process terminates and the memfd disappears. This requires real-time detection — once the process dies, the evidence is lost.
 
 **seccomp-bpf:**
-Un filtro seccomp puede bloquear `memfd_create` para procesos que no la necesitan. Dado que la mayoria de los programas nunca usan esta syscall, la politica de bloqueo tiene bajo impacto en funcionalidad.
+A seccomp filter can block `memfd_create` for processes that do not need it. Since most programs never use this syscall, the blocking policy has low impact on functionality.
 
-### La carrera contra el tiempo
+### The race against time
 
-La dificultad principal para el defensor es temporal. El memfd existe solo mientras el proceso lo mantiene abierto. Con `MFD_CLOEXEC`, el fd se cierra al ejecutar el payload. Si el proceso payload es efimero (ejecuta su tarea y termina), la ventana para capturar evidencia puede ser de milisegundos.
+The main difficulty for the defender is temporal. The memfd exists only while the process keeps it open. With `MFD_CLOEXEC`, the fd closes when the payload executes. If the payload process is ephemeral (executes its task and terminates), the window for capturing evidence can be milliseconds.
 
-Un atacante sofisticado puede reducir esta ventana aun mas: ejecutar el payload, capturar su output via pipes, y terminar el proceso inmediatamente. Para cuando un escaner periodico revisa `/proc`, el proceso ya no existe.
-
----
-
-## 6. Variantes y Evoluciones
-
-### Carga desde red
-
-En un escenario operacional real, el payload no estaria embebido en el loader. Se descargaria en runtime — desde un C2 via HTTPS, desde un recurso compartido, o desde un DNS tunnel. Los bytes viajan del socket directamente al memfd, sin tocar disco en ningun punto del camino.
-
-### Encriptacion en transito
-
-El payload puede almacenarse encriptado (en el loader o en el servidor C2) y desencriptarse en memoria antes de escribirlo al memfd. Esto agrega una capa adicional: incluso si un defensor captura el loader, el payload real no es visible sin la clave de desencriptacion.
-
-### Encadenamiento con ptrace
-
-En vez de ejecutar el payload en el propio proceso, se puede usar `ptrace` para inyectar el contenido del memfd en otro proceso ya existente. Esto combina fileless execution con process injection: el payload no solo no existe en disco, sino que se ejecuta dentro del contexto de un proceso legitimo.
+A sophisticated attacker can shrink this window even further: execute the payload, capture its output via pipes, and terminate the process immediately. By the time a periodic scanner checks `/proc`, the process no longer exists.
 
 ---
 
-## 7. Reflexion Final
+## 6. Variants and Evolutions
 
-`memfd_create` representa un punto interesante en la tension entre funcionalidad y seguridad del kernel Linux. Es una syscall util con casos de uso legitimos claros, pero su capacidad de crear objetos ejecutables que nunca tocan disco la convierte en una primitiva ofensiva de primera categoria.
+### Loading from the network
 
-A diferencia de las tecnicas de Windows que explotan gaps arquitecturales en flujos complejos, `memfd_create` es una herramienta directa: fue disenada para crear archivos en memoria, y eso es exactamente lo que hace un atacante. No hay exploit, no hay bug, no hay comportamiento inesperado. La syscall funciona perfectamente segun su especificacion.
+In a real operational scenario, the payload would not be embedded in the loader. It would be downloaded at runtime — from a C2 via HTTPS, from a shared resource, or from a DNS tunnel. The bytes travel from the socket directly to the memfd, never touching disk at any point along the way.
 
-La deteccion es posible — `/proc/<pid>/exe` apuntando a un memfd es un indicador fuerte — pero la mitigacion completa requiere decisiones de politica: ¿bloqueamos `memfd_create` para todos los procesos? ¿Solo para algunos? ¿Como manejamos los procesos legitimos que la necesitan?
+### Encryption in transit
 
-Estas preguntas no tienen respuestas tecnicas puras. Son decisiones de gestion de riesgo que cada organizacion debe tomar en funcion de su superficie de ataque, su tolerancia al impacto operacional, y la madurez de su programa de seguridad.
+The payload can be stored encrypted (in the loader or on the C2 server) and decrypted in memory before being written to the memfd. This adds an additional layer: even if a defender captures the loader, the actual payload is not visible without the decryption key.
+
+### Chaining with ptrace
+
+Instead of executing the payload in the current process, `ptrace` can be used to inject the memfd contents into another already-existing process. This combines fileless execution with process injection: the payload not only does not exist on disk, but executes within the context of a legitimate process.
 
 ---
 
-*Investigacion realizada como parte del proyecto [Black Hat Zig](https://github.com/JorgeBeritan) — documentacion de tecnicas ofensivas a nivel de syscall en Linux.*
+## 7. Final Reflection
+
+`memfd_create` represents an interesting point in the tension between the Linux kernel's functionality and security. It is a useful syscall with clear legitimate use cases, but its ability to create executable objects that never touch disk makes it a first-class offensive primitive.
+
+Unlike Windows techniques that exploit architectural gaps in complex flows, `memfd_create` is a direct tool: it was designed to create files in memory, and that is exactly what an attacker does with it. There is no exploit, no bug, no unexpected behavior. The syscall works perfectly according to its specification.
+
+Detection is possible — `/proc/<pid>/exe` pointing to a memfd is a strong indicator — but complete mitigation requires policy decisions: do we block `memfd_create` for all processes? Only some? How do we handle the legitimate processes that need it?
+
+These questions have no purely technical answers. They are risk management decisions that each organization must make based on their attack surface, their tolerance for operational impact, and the maturity of their security program.
+
+---
+
+*Research conducted as part of the [Black Hat Zig](https://github.com/JorgeBeritan) project — documentation of offensive techniques at the syscall level on Linux.*
