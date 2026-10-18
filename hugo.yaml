@@ -82,9 +82,9 @@ outputs:
 
 menu:
   main:
-    - identifier: research
-      name: Research
-      url: /research/
+    - identifier: bhz
+      name: Black Hat Zig
+      url: /black-hat-zig/
       weight: 10
     - identifier: tags
       name: Tags

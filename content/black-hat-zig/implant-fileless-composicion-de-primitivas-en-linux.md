@@ -12,7 +12,7 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisites:** [mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create and Fileless Execution](/research/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace and Process Injection](/research/ptrace-inyeccion-de-procesos-en-linux/)
+**Prerequisites:** [mprotect as an Attack Vector](/black-hat-zig/mprotect-ejecucion-dinamica-de-codigo-en-linux/) · [memfd_create and Fileless Execution](/black-hat-zig/memfd-create-ejecucion-sin-archivo-en-linux/) · [ptrace and Process Injection](/black-hat-zig/ptrace-inyeccion-de-procesos-en-linux/)
 
 ---
 

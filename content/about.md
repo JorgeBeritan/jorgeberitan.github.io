@@ -11,7 +11,7 @@ ShowReadingTime: false
 
 Security engineer focused on offensive security, systems programming, and low-level tooling development.
 
-Currently building [Black Hat Zig](/research/) — a research project exploring Zig as a language for offensive security tooling. The project documents the implementation of techniques ranging from network reconnaissance to process injection, fileless execution, and implant engineering, all built from syscall-level primitives.
+Currently building [Black Hat Zig](/black-hat-zig/) — a research project exploring Zig as a language for offensive security tooling. The project documents the implementation of techniques ranging from network reconnaissance to process injection, fileless execution, and implant engineering, all built from syscall-level primitives.
 
 ### Why Zig
 

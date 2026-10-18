@@ -12,7 +12,7 @@ ShowToc: true
 TocOpen: true
 ---
 
-**Prerequisite:** [Dynamic Code Execution: mprotect as an Attack Vector](/research/mprotect-ejecucion-dinamica-de-codigo-en-linux/)
+**Prerequisite:** [Dynamic Code Execution: mprotect as an Attack Vector](/black-hat-zig/mprotect-ejecucion-dinamica-de-codigo-en-linux/)
 
 ---
 
